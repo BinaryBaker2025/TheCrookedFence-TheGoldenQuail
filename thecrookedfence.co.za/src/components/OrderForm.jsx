@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   addDoc,
   collection,
@@ -14,6 +15,7 @@ import {
   COUNTRY_CODES,
   DEFAULT_FORM_DELIVERY_OPTIONS,
   DEFAULT_LIVESTOCK_DELIVERY_OPTIONS,
+  UNCATEGORIZED_LABEL,
 } from "../data/defaults.js";
 
 const cardClass =
@@ -48,6 +50,15 @@ const toQuantityMap = (items, existing = {}) => {
   return map;
 };
 
+const normalizePhoneDigits = (value) => value.replace(/[^\d]/g, "");
+
+const isValidCellphone = (value) => {
+  const digits = normalizePhoneDigits(value);
+  if (digits.length === 9) return true;
+  if (digits.length === 10) return digits.startsWith("0");
+  return false;
+};
+
 export default function OrderForm({ variant = "eggs" }) {
   const isLivestock = variant === "livestock";
   const pageTitle = isLivestock
@@ -63,6 +74,7 @@ export default function OrderForm({ variant = "eggs" }) {
   const dateHelper = isLivestock
     ? "Tell us when you need the livestock (e.g., next week Wednesday)."
     : "";
+  const typeDetailBase = isLivestock ? "/livestock" : "/eggs";
 
   const initialItems = [];
   const [items, setItems] = useState(initialItems);
@@ -82,6 +94,8 @@ export default function OrderForm({ variant = "eggs" }) {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [orderNumber, setOrderNumber] = useState(null);
   const [indemnityAccepted, setIndemnityAccepted] = useState(false);
+  const [fieldErrors, setFieldErrors] = useState({});
+  const fieldRefs = useRef({});
 
   useEffect(() => {
     const ref = collection(db, isLivestock ? "livestockTypes" : "eggTypes");
@@ -102,6 +116,7 @@ export default function OrderForm({ variant = "eggs" }) {
             order: docData.order ?? 0,
             categoryId: docData.categoryId ?? "",
             categoryName: docData.categoryName ?? docData.category ?? "",
+            imageUrl: docData.imageUrl ?? "",
             available: docData.available !== false,
           };
         });
@@ -119,28 +134,47 @@ export default function OrderForm({ variant = "eggs" }) {
   }, [isLivestock]);
 
   useEffect(() => {
-    if (!isLivestock) {
-      setCategories([]);
-      return undefined;
-    }
-
-    const ref = collection(db, "livestockCategories");
-    const categoriesQuery = query(ref, orderBy("name", "asc"));
+    const ref = collection(
+      db,
+      isLivestock ? "livestockCategories" : "eggCategories"
+    );
+    const categoriesQuery = query(
+      ref,
+      orderBy(isLivestock ? "name" : "order", "asc")
+    );
     const unsubscribe = onSnapshot(
       categoriesQuery,
       (snapshot) => {
         const data = snapshot.docs.map((docSnap) => {
           const docData = docSnap.data();
+          const rawOrder = docData.order;
           return {
             id: docSnap.id,
             name: docData.name ?? "",
             description: docData.description ?? "",
+            order:
+              rawOrder === null || rawOrder === undefined ? null : Number(rawOrder),
           };
         });
-        setCategories(data);
+        const sorted = data
+          .slice()
+          .sort((a, b) => {
+            if (isLivestock) {
+              return a.name.localeCompare(b.name);
+            }
+            const aOrder = Number.isFinite(a.order)
+              ? a.order
+              : Number.POSITIVE_INFINITY;
+            const bOrder = Number.isFinite(b.order)
+              ? b.order
+              : Number.POSITIVE_INFINITY;
+            if (aOrder !== bOrder) return aOrder - bOrder;
+            return a.name.localeCompare(b.name);
+          });
+        setCategories(sorted);
       },
       (err) => {
-        console.error("livestockCategories load error", err);
+        console.error("categories load error", err);
         setCategories([]);
       }
     );
@@ -233,15 +267,40 @@ export default function OrderForm({ variant = "eggs" }) {
 
   const setField = (field, value) => {
     setForm((prev) => ({ ...prev, [field]: value }));
+    setFieldErrors((prev) => {
+      if (
+        !prev[field] &&
+        !(field === "deliveryOption" && prev.otherDelivery && value !== "other")
+      ) {
+        return prev;
+      }
+      const next = { ...prev };
+      delete next[field];
+      if (field === "deliveryOption" && value !== "other") {
+        delete next.otherDelivery;
+      }
+      return next;
+    });
+  };
+
+  const clearFieldError = (field) => {
+    setFieldErrors((prev) => {
+      if (!prev[field]) return prev;
+      const next = { ...prev };
+      delete next[field];
+      return next;
+    });
   };
 
   const formatCellphone = () => {
-    const digits = form.countryCode.replace(/[^\d]/g, "");
-    const prefix = digits ? `+${digits}` : "";
-    return `${prefix} ${form.cellphone.trim()}`.trim();
+    const countryDigits = form.countryCode.replace(/[^\d]/g, "");
+    const prefix = countryDigits ? `+${countryDigits}` : "";
+    const localDigits = normalizePhoneDigits(form.cellphone);
+    return [prefix, localDigits].filter(Boolean).join(" ").trim();
   };
 
   const validate = () => {
+    const nextErrors = {};
     if (
       !form.name.trim() ||
       !form.surname.trim() ||
@@ -252,22 +311,78 @@ export default function OrderForm({ variant = "eggs" }) {
       !form.deliveryOption ||
       !form.sendDate
     ) {
-      return "Please fill in all required fields.";
+      if (!form.sendDate) nextErrors.sendDate = "required";
+      if (!form.name.trim()) nextErrors.name = "required";
+      if (!form.surname.trim()) nextErrors.surname = "required";
+      if (!form.email.trim()) nextErrors.email = "required";
+      if (!form.countryCode.trim()) nextErrors.countryCode = "required";
+      if (!form.cellphone.trim()) nextErrors.cellphone = "required";
+      if (!form.address.trim()) nextErrors.address = "required";
+      if (!form.deliveryOption) nextErrors.deliveryOption = "required";
     }
     if (form.deliveryOption === "other" && !form.otherDelivery.trim()) {
-      return "Please specify your other delivery option.";
+      nextErrors.otherDelivery = "required";
+    }
+    if (form.cellphone.trim() && !isValidCellphone(form.cellphone)) {
+      nextErrors.cellphone = "invalid";
     }
     if (selectedItems.length === 0) {
-      return `Please order at least one ${itemLabel} (quantities above 0).`;
+      nextErrors.items = "required";
     }
     if (!indemnityAccepted) {
-      return "Please accept the indemnity terms to continue.";
+      nextErrors.indemnity = "required";
     }
-    return "";
+    if (Object.keys(nextErrors).length === 0) {
+      return { message: "", errors: {}, firstInvalidField: "" };
+    }
+
+    const orderedKeys = [
+      "sendDate",
+      "items",
+      "name",
+      "surname",
+      "email",
+      "countryCode",
+      "cellphone",
+      "address",
+      "deliveryOption",
+      "otherDelivery",
+      "indemnity",
+    ];
+    const firstInvalidField =
+      orderedKeys.find((key) => nextErrors[key]) ??
+      Object.keys(nextErrors)[0];
+
+    let message = "Please fill in all required fields.";
+    if (firstInvalidField === "items") {
+      message = `Please order at least one ${itemLabel} (quantities above 0).`;
+    } else if (firstInvalidField === "otherDelivery") {
+      message = "Please specify your other delivery option.";
+    } else if (
+      firstInvalidField === "cellphone" &&
+      nextErrors.cellphone === "invalid"
+    ) {
+      message = "Cellphone number must be 9 digits, or 10 digits starting with 0.";
+    } else if (firstInvalidField === "indemnity") {
+      message = "Please accept the indemnity terms to continue.";
+    }
+
+    return { message, errors: nextErrors, firstInvalidField };
   };
 
-  const groupedLivestock = useMemo(() => {
-    if (!isLivestock) return [];
+  const scrollToField = (field) => {
+    const element = fieldRefs.current[field];
+    if (!element) return;
+    element.scrollIntoView({ behavior: "smooth", block: "center" });
+    if (typeof element.focus === "function") {
+      element.focus({ preventScroll: true });
+    }
+  };
+
+  const showGroupedItems = isLivestock || categories.length > 0;
+
+  const groupedItems = useMemo(() => {
+    if (!showGroupedItems) return [];
     const categoryMap = new Map();
     const categoryIds = categories.map((cat) => cat.id);
     const categoryDescriptionMap = new Map(
@@ -276,11 +391,12 @@ export default function OrderForm({ variant = "eggs" }) {
         cat.description ?? "",
       ])
     );
+    const fallbackLabel = isLivestock ? "Category" : UNCATEGORIZED_LABEL;
 
     items.forEach((item) => {
       const fallbackName = item.categoryName?.trim().length
         ? item.categoryName
-        : "Category";
+        : fallbackLabel;
       const key = item.categoryId || `name:${fallbackName}`;
       const category = categories.find((cat) => cat.id === item.categoryId);
       const label = category?.name ?? fallbackName;
@@ -303,7 +419,7 @@ export default function OrderForm({ variant = "eggs" }) {
     ];
 
     return orderedKeys.map((id) => ({ id, ...categoryMap.get(id) }));
-  }, [items, categories, isLivestock]);
+  }, [categories, isLivestock, items, showGroupedItems]);
 
   const submitOrder = async (event) => {
     event.preventDefault();
@@ -311,13 +427,18 @@ export default function OrderForm({ variant = "eggs" }) {
     setSuccess("");
     setOrderNumber(null);
 
-    const validationError = validate();
-    if (validationError) {
-      setError(validationError);
+    const { message, errors, firstInvalidField } = validate();
+    if (message) {
+      setFieldErrors(errors);
+      setError(message);
+      if (firstInvalidField) {
+        scrollToField(firstInvalidField);
+      }
       return;
     }
 
     setIsSubmitting(true);
+    setFieldErrors({});
     try {
       const selectedDelivery = deliveryOptions.find(
         (option) => option.id === form.deliveryOption
@@ -382,6 +503,7 @@ export default function OrderForm({ variant = "eggs" }) {
         items.reduce((acc, item) => ({ ...acc, [item.id]: 0 }), {})
       );
       setIndemnityAccepted(false);
+      setFieldErrors({});
     } catch (err) {
       console.error("Order submit error:", err);
       const message =
@@ -467,9 +589,17 @@ export default function OrderForm({ variant = "eggs" }) {
               </p>
               <input
                 type="date"
-                className={`${inputClass} md:w-56`}
+                className={`${inputClass} md:w-56 ${
+                  fieldErrors.sendDate
+                    ? "border-red-400 focus:border-red-500 focus:ring-red-200"
+                    : ""
+                }`}
                 value={form.sendDate}
                 onChange={(event) => setField("sendDate", event.target.value)}
+                ref={(element) => {
+                  fieldRefs.current.sendDate = element;
+                }}
+                aria-invalid={Boolean(fieldErrors.sendDate)}
                 required
               />
               {dateHelper ? (
@@ -478,14 +608,24 @@ export default function OrderForm({ variant = "eggs" }) {
             </div>
           </div>
 
-          {isLivestock ? (
-            <div className="space-y-4">
-              {groupedLivestock.length === 0 ? (
+          {showGroupedItems ? (
+            <div
+              className={`space-y-4 ${
+                fieldErrors.items ? "rounded-xl ring-2 ring-red-300" : ""
+              }`}
+              ref={(element) => {
+                fieldRefs.current.items = element;
+              }}
+              aria-invalid={Boolean(fieldErrors.items)}
+            >
+              {groupedItems.length === 0 ? (
                 <div className="rounded-xl border border-dashed border-brandGreen/30 bg-white/70 px-4 py-6 text-sm text-brandGreen/70">
-                  No livestock types found. Add some on the admin dashboard.
+                  {isLivestock
+                    ? "No livestock types found. Add some on the admin dashboard."
+                    : "No egg types found. Add some on the admin dashboard."}
                 </div>
               ) : (
-                groupedLivestock.map((group) => (
+                groupedItems.map((group) => (
                   <div
                     key={group.id}
                     className="space-y-2 rounded-xl border border-brandGreen/15 bg-white/70 p-4 shadow-sm"
@@ -518,46 +658,78 @@ export default function OrderForm({ variant = "eggs" }) {
                               isAvailable ? "" : "opacity-60"
                             }`}
                           >
-                            <div className="flex justify-between gap-3">
-                              <div>
-                                <p className="font-semibold text-brandGreen">
-                                  {item.label}
-                                </p>
-                                <p className="text-sm text-brandGreen/70">
-                                  Normal: R{item.price.toFixed(2)}
-                                  {item.specialPrice !== null &&
-                                  item.specialPrice !== undefined
-                                    ? ` \u00b7 Special: R${item.specialPrice.toFixed(
-                                        2
-                                      )}`
-                                    : ""}
-                                </p>
-                                {!isAvailable ? (
-                                  <p className="text-xs font-semibold text-brandGreen/60">
-                                    Unavailable
+                            <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                              <div className="flex flex-1 gap-3">
+                                <div className="h-20 w-24 flex-shrink-0 overflow-hidden rounded-lg border border-brandGreen/20 bg-white/80">
+                                  {item.imageUrl ? (
+                                    <img
+                                      src={item.imageUrl}
+                                      alt={item.label}
+                                      className="h-full w-full object-cover"
+                                      loading="lazy"
+                                    />
+                                  ) : (
+                                    <div className="flex h-full w-full items-center justify-center text-[11px] text-brandGreen/50">
+                                      No image
+                                    </div>
+                                  )}
+                                </div>
+                                <div className="min-w-0">
+                                  <Link
+                                    to={`${typeDetailBase}/${item.id}`}
+                                    className="font-semibold text-brandGreen transition hover:underline"
+                                  >
+                                    {item.label}
+                                  </Link>
+                                  <p className="text-sm text-brandGreen/70">
+                                    Normal Price: R{item.price.toFixed(2)}
+                                    {item.specialPrice !== null &&
+                                    item.specialPrice !== undefined &&
+                                    Number(item.specialPrice) > 0
+                                      ? ` \u00b7 Special Price: R${item.specialPrice.toFixed(
+                                          2
+                                        )}`
+                                      : ""}
                                   </p>
-                                ) : null}
+                                  {!isAvailable ? (
+                                    <p className="text-xs font-semibold text-brandGreen/60">
+                                      Unavailable
+                                    </p>
+                                  ) : null}
+                                </div>
                               </div>
-                              <input
-                                type="number"
-                                min={0}
-                                disabled={!isAvailable}
-                                className={`w-24 rounded-lg border border-brandGreen/30 px-3 py-2 text-right font-semibold text-brandGreen focus:border-brandGreen focus:outline-none focus:ring-2 focus:ring-brandGreen/30 ${
-                                  isAvailable
-                                    ? "bg-brandCream"
-                                    : "bg-gray-100 text-brandGreen/50"
-                                }`}
-                                value={quantities[item.id] ?? 0}
-                                onChange={(event) =>
-                                  setQuantities((prev) => ({
-                                    ...prev,
-                                    [item.id]: Math.max(
+                              <div className="flex items-start justify-end">
+                                <input
+                                  type="number"
+                                  min={0}
+                                  disabled={!isAvailable}
+                                  className={`w-24 rounded-lg border border-brandGreen/30 px-3 py-2 text-right font-semibold text-brandGreen focus:border-brandGreen focus:outline-none focus:ring-2 focus:ring-brandGreen/30 ${
+                                    isAvailable
+                                      ? "bg-brandCream"
+                                      : "bg-gray-100 text-brandGreen/50"
+                                  }`}
+                                  value={quantities[item.id] ?? 0}
+                                  onChange={(event) => {
+                                    const nextValue = Math.max(
                                       0,
                                       Number(event.target.value)
-                                    ),
-                                  }))
-                                }
-                              />
+                                    );
+                                    const hasAny =
+                                      nextValue > 0 ||
+                                      Object.entries(quantities).some(
+                                        ([id, qty]) =>
+                                          id !== item.id && qty > 0
+                                      );
+                                    if (hasAny) {
+                                      clearFieldError("items");
+                                    }
+                                    setQuantities((prev) => ({
+                                      ...prev,
+                                      [item.id]: nextValue,
+                                    }));
+                                  }}
+                                />
+                              </div>
                             </div>
                           </div>
                         );
@@ -568,7 +740,15 @@ export default function OrderForm({ variant = "eggs" }) {
               )}
             </div>
           ) : (
-            <div className="grid gap-3 md:grid-cols-2">
+            <div
+              className={`grid gap-3 md:grid-cols-2 ${
+                fieldErrors.items ? "rounded-xl ring-2 ring-red-300" : ""
+              }`}
+              ref={(element) => {
+                fieldRefs.current.items = element;
+              }}
+              aria-invalid={Boolean(fieldErrors.items)}
+            >
               {items.length === 0 ? (
                 <div className="rounded-xl border border-dashed border-brandGreen/30 bg-white/70 px-4 py-6 text-sm text-brandGreen/70">
                   No egg types found. Add some on the admin dashboard.
@@ -583,64 +763,98 @@ export default function OrderForm({ variant = "eggs" }) {
                         isAvailable ? "" : "opacity-60"
                       }`}
                     >
-                      <div className="flex justify-between gap-3">
-                        <div>
-                          <p className="font-semibold text-brandGreen">
-                            {item.label}
-                          </p>
-                          <p className="text-sm text-brandGreen/70">
-                            Normal: R{item.price.toFixed(2)}
-                            {item.specialPrice !== null &&
-                            item.specialPrice !== undefined
-                              ? ` \u00b7 Special: R${item.specialPrice.toFixed(
-                                  2
-                                )}`
-                              : ""}
-                          </p>
-                          {!isAvailable ? (
-                            <p className="text-xs font-semibold text-brandGreen/60">
-                              Unavailable
+                      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                        <div className="flex flex-1 gap-3">
+                          <div className="h-20 w-24 flex-shrink-0 overflow-hidden rounded-lg border border-brandGreen/20 bg-white/80">
+                            {item.imageUrl ? (
+                              <img
+                                src={item.imageUrl}
+                                alt={item.label}
+                                className="h-full w-full object-cover"
+                                loading="lazy"
+                              />
+                            ) : (
+                              <div className="flex h-full w-full items-center justify-center text-[11px] text-brandGreen/50">
+                                No image
+                              </div>
+                            )}
+                          </div>
+                          <div className="min-w-0">
+                            <Link
+                              to={`${typeDetailBase}/${item.id}`}
+                              className="font-semibold text-brandGreen transition hover:underline"
+                            >
+                              {item.label}
+                            </Link>
+                            <p className="text-sm text-brandGreen/70">
+                              Normal Price: R{item.price.toFixed(2)}
+                              {item.specialPrice !== null &&
+                              item.specialPrice !== undefined &&
+                              Number(item.specialPrice) > 0
+                                ? ` \u00b7 Special Price: R${item.specialPrice.toFixed(
+                                    2
+                                  )}`
+                                : ""}
                             </p>
-                          ) : null}
+                            {!isAvailable ? (
+                              <p className="text-xs font-semibold text-brandGreen/60">
+                                Unavailable
+                              </p>
+                            ) : null}
+                          </div>
                         </div>
-                        <input
-                          type="number"
-                          min={0}
-                          disabled={!isAvailable}
-                          className={`w-24 rounded-lg border border-brandGreen/30 px-3 py-2 text-right font-semibold text-brandGreen focus:border-brandGreen focus:outline-none focus:ring-2 focus:ring-brandGreen/30 ${
-                            isAvailable
-                              ? "bg-brandCream"
-                              : "bg-gray-100 text-brandGreen/50"
-                          }`}
-                          value={quantities[item.id] ?? 0}
-                          onChange={(event) =>
-                            setQuantities((prev) => ({
-                              ...prev,
-                              [item.id]: Math.max(
+                        <div className="flex items-start justify-end">
+                          <input
+                            type="number"
+                            min={0}
+                            disabled={!isAvailable}
+                            className={`w-24 rounded-lg border border-brandGreen/30 px-3 py-2 text-right font-semibold text-brandGreen focus:border-brandGreen focus:outline-none focus:ring-2 focus:ring-brandGreen/30 ${
+                              isAvailable
+                                ? "bg-brandCream"
+                                : "bg-gray-100 text-brandGreen/50"
+                            }`}
+                            value={quantities[item.id] ?? 0}
+                            onChange={(event) => {
+                              const nextValue = Math.max(
                                 0,
                                 Number(event.target.value)
-                              ),
-                            }))
-                          }
-                        />
+                              );
+                              const hasAny =
+                                nextValue > 0 ||
+                                Object.entries(quantities).some(
+                                  ([id, qty]) => id !== item.id && qty > 0
+                                );
+                              if (hasAny) {
+                                clearFieldError("items");
+                              }
+                              setQuantities((prev) => ({
+                                ...prev,
+                                [item.id]: nextValue,
+                              }));
+                            }}
+                          />
+                        </div>
                       </div>
                     </div>
                   );
                 })
               )}
-              <div className="space-y-2">
-                <label className="block text-sm font-semibold text-brandGreen">
-                  Notes / comments (optional)
-                </label>
-                <textarea
-                  className={`${inputClass} min-h-28`}
-                  value={form.notes}
-                  onChange={(event) => setField("notes", event.target.value)}
-                  placeholder="Add any special requests or notes for the farm..."
-                />
-              </div>
             </div>
           )}
+
+          {!isLivestock ? (
+            <div className="mt-4 space-y-2">
+              <label className="block text-sm font-semibold text-brandGreen">
+                Notes / comments (optional)
+              </label>
+              <textarea
+                className={`${inputClass} min-h-28`}
+                value={form.notes}
+                onChange={(event) => setField("notes", event.target.value)}
+                placeholder="Add any special requests or notes for the farm..."
+              />
+            </div>
+          ) : null}
         </div>
 
         <div className="grid gap-4 md:grid-cols-2">
@@ -650,9 +864,17 @@ export default function OrderForm({ variant = "eggs" }) {
             </label>
             <input
               type="text"
-              className={inputClass}
+              className={`${inputClass} ${
+                fieldErrors.name
+                  ? "border-red-400 focus:border-red-500 focus:ring-red-200"
+                  : ""
+              }`}
               value={form.name}
               onChange={(event) => setField("name", event.target.value)}
+              ref={(element) => {
+                fieldRefs.current.name = element;
+              }}
+              aria-invalid={Boolean(fieldErrors.name)}
               required
             />
           </div>
@@ -662,9 +884,17 @@ export default function OrderForm({ variant = "eggs" }) {
             </label>
             <input
               type="text"
-              className={inputClass}
+              className={`${inputClass} ${
+                fieldErrors.surname
+                  ? "border-red-400 focus:border-red-500 focus:ring-red-200"
+                  : ""
+              }`}
               value={form.surname}
               onChange={(event) => setField("surname", event.target.value)}
+              ref={(element) => {
+                fieldRefs.current.surname = element;
+              }}
+              aria-invalid={Boolean(fieldErrors.surname)}
               required
             />
           </div>
@@ -674,9 +904,17 @@ export default function OrderForm({ variant = "eggs" }) {
             </label>
             <input
               type="email"
-              className={inputClass}
+              className={`${inputClass} ${
+                fieldErrors.email
+                  ? "border-red-400 focus:border-red-500 focus:ring-red-200"
+                  : ""
+              }`}
               value={form.email}
               onChange={(event) => setField("email", event.target.value)}
+              ref={(element) => {
+                fieldRefs.current.email = element;
+              }}
+              aria-invalid={Boolean(fieldErrors.email)}
               required
             />
           </div>
@@ -686,11 +924,19 @@ export default function OrderForm({ variant = "eggs" }) {
             </label>
             <div className="grid grid-cols-[200px_1fr] gap-2">
               <select
-                className={inputClass}
+                className={`${inputClass} ${
+                  fieldErrors.countryCode
+                    ? "border-red-400 focus:border-red-500 focus:ring-red-200"
+                    : ""
+                }`}
                 value={form.countryCode}
                 onChange={(event) =>
                   setField("countryCode", event.target.value)
                 }
+                ref={(element) => {
+                  fieldRefs.current.countryCode = element;
+                }}
+                aria-invalid={Boolean(fieldErrors.countryCode)}
               >
                 {COUNTRY_CODES.map((country) => (
                   <option key={country.code} value={country.code}>
@@ -700,10 +946,18 @@ export default function OrderForm({ variant = "eggs" }) {
               </select>
               <input
                 type="tel"
-                className={inputClass}
+                className={`${inputClass} ${
+                  fieldErrors.cellphone
+                    ? "border-red-400 focus:border-red-500 focus:ring-red-200"
+                    : ""
+                }`}
                 value={form.cellphone}
                 onChange={(event) => setField("cellphone", event.target.value)}
                 placeholder="e.g. 82 123 4567"
+                ref={(element) => {
+                  fieldRefs.current.cellphone = element;
+                }}
+                aria-invalid={Boolean(fieldErrors.cellphone)}
                 required
               />
             </div>
@@ -713,10 +967,18 @@ export default function OrderForm({ variant = "eggs" }) {
               Delivery address*
             </label>
             <textarea
-              className={`${inputClass} min-h-28`}
+              className={`${inputClass} min-h-28 ${
+                fieldErrors.address
+                  ? "border-red-400 focus:border-red-500 focus:ring-red-200"
+                  : ""
+              }`}
               value={form.address}
               onChange={(event) => setField("address", event.target.value)}
               placeholder="Street name and number, Suburb, Town, Postal code. For PUDO please add the locker name. (PUDO IS FOR EGGS ONLY)"
+              ref={(element) => {
+                fieldRefs.current.address = element;
+              }}
+              aria-invalid={Boolean(fieldErrors.address)}
               required
             />
             <p className="text-xs text-brandGreen/70">
@@ -726,7 +988,15 @@ export default function OrderForm({ variant = "eggs" }) {
           </div>
         </div>
 
-        <div className={`${cardClass} p-4 md:p-5`}>
+        <div
+          className={`${cardClass} p-4 md:p-5 ${
+            fieldErrors.deliveryOption ? "ring-2 ring-red-300" : ""
+          }`}
+          ref={(element) => {
+            fieldRefs.current.deliveryOption = element;
+          }}
+          aria-invalid={Boolean(fieldErrors.deliveryOption)}
+        >
           <h2 className="text-lg font-bold text-brandGreen">
             Delivery options*
           </h2>
@@ -762,12 +1032,20 @@ export default function OrderForm({ variant = "eggs" }) {
               </label>
               <input
                 type="text"
-                className={inputClass}
+                className={`${inputClass} ${
+                  fieldErrors.otherDelivery
+                    ? "border-red-400 focus:border-red-500 focus:ring-red-200"
+                    : ""
+                }`}
                 value={form.otherDelivery}
                 onChange={(event) =>
                   setField("otherDelivery", event.target.value)
                 }
                 placeholder="e.g. Meet at local pickup point"
+                ref={(element) => {
+                  fieldRefs.current.otherDelivery = element;
+                }}
+                aria-invalid={Boolean(fieldErrors.otherDelivery)}
               />
             </div>
           ) : null}
@@ -811,7 +1089,15 @@ export default function OrderForm({ variant = "eggs" }) {
           </div>
         </div>
 
-        <div className="rounded-xl border border-brandGreen/15 bg-white/80 px-4 py-3 text-sm text-brandGreen shadow-sm">
+        <div
+          className={`rounded-xl border border-brandGreen/15 bg-white/80 px-4 py-3 text-sm text-brandGreen shadow-sm ${
+            fieldErrors.indemnity ? "ring-2 ring-red-300" : ""
+          }`}
+          ref={(element) => {
+            fieldRefs.current.indemnity = element;
+          }}
+          aria-invalid={Boolean(fieldErrors.indemnity)}
+        >
           <p className="text-xs font-semibold uppercase tracking-wide text-brandGreen/60">
             Indemnity
           </p>
@@ -823,7 +1109,12 @@ export default function OrderForm({ variant = "eggs" }) {
               type="checkbox"
               className="mt-1 h-4 w-4 rounded border-brandGreen text-brandGreen focus:ring-brandGreen"
               checked={indemnityAccepted}
-              onChange={(event) => setIndemnityAccepted(event.target.checked)}
+              onChange={(event) => {
+                setIndemnityAccepted(event.target.checked);
+                if (event.target.checked) {
+                  clearFieldError("indemnity");
+                }
+              }}
               required
             />
             <span>{indemnityAcceptanceText}</span>

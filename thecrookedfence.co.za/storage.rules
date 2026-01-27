@@ -37,5 +37,10 @@ service firebase.storage {
       allow write: if isSignedIn() && request.auth.uid == userId;
       allow read: if isAdmin();
     }
+
+    match /types/{typeGroup}/{typeId}/{fileName} {
+      allow read: if true;
+      allow write: if isSignedIn() && (typeGroup == "egg" || typeGroup == "livestock");
+    }
   }
 }

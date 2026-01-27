@@ -5,6 +5,7 @@ import { auth } from "./lib/firebase.js";
 import AdminPage from "./pages/AdminPage.jsx";
 import EggOrderPage from "./pages/EggOrderPage.jsx";
 import LivestockOrderPage from "./pages/LivestockOrderPage.jsx";
+import TypeDetailPage from "./pages/TypeDetailPage.jsx";
 
 const navLinkClass = ({ isActive }) =>
   [
@@ -57,7 +58,12 @@ export default function App() {
             <Route path="/" element={<Navigate to="/eggs" replace />} />
             <Route path="/egg" element={<Navigate to="/eggs" replace />} />
             <Route path="/eggs" element={<EggOrderPage />} />
+            <Route path="/eggs/:typeId" element={<TypeDetailPage variant="eggs" />} />
             <Route path="/livestock" element={<LivestockOrderPage />} />
+            <Route
+              path="/livestock/:typeId"
+              element={<TypeDetailPage variant="livestock" />}
+            />
             <Route path="/admin" element={<AdminPage />} />
           </Routes>
         </main>

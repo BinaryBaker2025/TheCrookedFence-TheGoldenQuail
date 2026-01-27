@@ -1,0 +1,211 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isBootstrapAdmin() {
+      let email = request.auth != null &&
+                  request.auth.token.email != null
+        ? request.auth.token.email.toLowerCase()
+        : null;
+
+      return email == 'bradsgbaker14@gmail.com' ||
+             email == 'admin@thecrookedfence.co.za' ||
+             email == 'stolschristopher60@gmail.com';
+    }
+
+    // FIXED: No get(), no dynamic path lookups.
+    function requesterRole() {
+      return request.auth != null && request.auth.token.role != null
+        ? request.auth.token.role
+        : (isBootstrapAdmin() ? 'admin' : null);
+    }
+
+    function isSuperAdmin() { return requesterRole() == 'super_admin'; }
+    function isAdmin() { let r = requesterRole(); return r == 'admin' || r == 'super_admin'; }
+    function isWorker() { return requesterRole() == 'worker'; }
+
+    function isValidOrderPhone(value) {
+      return value is string &&
+        value.matches('^(\\+\\d{1,4}\\s+)?(\\d{9}|0\\d{9})$');
+    }
+
+    // ------------------------------
+    // Orders
+    // ------------------------------
+    match /eggOrders/{docId} {
+      allow create: if isValidOrderPhone(request.resource.data.cellphone);
+      allow read: if true;
+      // Allow any authenticated user to update; UI enforces admin
+      // Also allow unauthenticated updates when only internalNote changes (admin internal note UI)
+      allow update: if request.auth != null ||
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(["internalNote"]);
+      // Allow any authenticated user to delete (UI enforces admin)
+      allow delete: if request.auth != null;
+    }
+
+    match /financeEntries/{entryId} {
+      allow read, create, delete: if request.auth != null;
+      allow update: if false;
+    }
+
+    match /livestockOrders/{docId} {
+      allow create: if isValidOrderPhone(request.resource.data.cellphone);
+      allow read: if true;
+      // Allow any authenticated user to update; UI enforces admin
+      // Also allow unauthenticated updates when only internalNote changes
+      allow update: if request.auth != null ||
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(["internalNote"]);
+      allow delete: if request.auth != null;
+    }
+
+    match /eggCategories/{docId} {
+      // Open read so the public egg form can load categories
+      allow read: if true;
+      // Allow any signed-in user; UI restricts to admins
+      allow create, update, delete: if request.auth != null;
+    }
+
+    match /eggTypes/{docId} {
+      allow read: if true;
+      allow create, update, delete: if request.auth != null;
+    }
+
+    match /deliveryOptions/{docId} {
+      allow read: if true;
+      // Allow any authenticated user; UI restricts to admins
+      allow create, update, delete: if request.auth != null;
+    }
+
+    match /livestockDeliveryOptions/{docId} {
+      allow read: if true;
+      // Allow any authenticated user; UI restricts to admins
+      allow create, update, delete: if request.auth != null;
+    }
+
+    // ------------------------------
+    // Users
+    // ------------------------------
+    match /users/{uid} {
+      allow read: if request.auth != null;
+      allow create, update, delete: if request.auth != null &&
+        (
+          isSuperAdmin() ||
+          (
+            isAdmin() &&
+            request.resource.data.role != 'super_admin' &&
+            resource.data.role != 'super_admin'
+          )
+        );
+    }
+
+    // ------------------------------
+    // Stock
+    // ------------------------------
+    match /stockCategories/{docId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null;
+      // Allow any signed-in user to update (e.g., add subcategories)
+      allow update: if request.auth != null;
+      // Any signed-in user can delete a category
+      allow delete: if request.auth != null;
+    }
+
+    match /stockItems/{docId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null;
+      // Allow any authenticated user to delete/update items (UI enforces who can delete)
+      allow delete: if request.auth != null;
+      allow update: if request.auth != null;
+    }
+
+    match /stockLogs/{docId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null;
+      allow delete, update: if false;
+    }
+
+    // Stock update submissions (history/logbook)
+    match /stockUpdateLogs/{docId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null;
+      allow update, delete: if false;
+    }
+
+    // ------------------------------
+    // Feed
+    // ------------------------------
+    match /feedCategories/{docId} {
+      allow read: if request.auth != null;
+      allow create, update, delete: if request.auth != null && (isAdmin() || isSuperAdmin());
+    }
+
+    match /feedLogs/{docId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null;
+      allow delete, update: if false;
+    }
+
+    // ------------------------------
+    // Egg Collection
+    // ------------------------------
+    match /eggCollectCategories/{docId} {
+      allow read: if request.auth != null;
+      allow create, update, delete: if request.auth != null && (isAdmin() || isSuperAdmin());
+    }
+
+    match /eggCollectLogs/{docId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null;
+      allow delete, update: if false;
+    }
+
+    // ------------------------------
+    // Livestock
+    // ------------------------------
+    match /livestockCategories/{docId} {
+      // Open read so the public livestock form can load categories
+      allow read: if true;
+      // Allow any signed-in user; UI restricts to admins
+      allow create, update, delete: if request.auth != null;
+    }
+
+    match /livestockTypes/{docId} {
+      // Open read so the public livestock form can load types
+      allow read: if true;
+      // Allow any signed-in user; UI restricts to admins
+      allow create, update, delete: if request.auth != null;
+    }
+
+    // ------------------------------
+    // Chicks
+    // ------------------------------
+    match /chickCategories/{docId} {
+      allow read: if request.auth != null;
+      allow create, update, delete: if request.auth != null && (isAdmin() || isSuperAdmin());
+    }
+
+    match /chickLogs/{docId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null;
+      allow delete, update: if false;
+    }
+
+    // ------------------------------
+    // Deaths
+    // ------------------------------
+    match /deathCategories/{docId} {
+      allow read: if request.auth != null;
+      allow create, update, delete: if request.auth != null && (isAdmin() || isSuperAdmin());
+    }
+
+    match /deathLogs/{docId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null;
+      allow delete, update: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

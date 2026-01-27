@@ -112,6 +112,11 @@ const formatCurrency = (value) => {
   return `R${Number(value).toFixed(2)}`;
 };
 
+const sanitizeFileName = (name) =>
+  String(name || "image")
+    .trim()
+    .replace(/[^A-Za-z0-9._-]/g, "_");
+
 const toNumber = (value) => {
   const parsed = Number(value);
   if (Number.isFinite(parsed)) return parsed;
@@ -774,6 +779,7 @@ function AdminDashboard({ user, role }) {
   const [eggOrders, setEggOrders] = useState([]);
   const [livestockOrders, setLivestockOrders] = useState([]);
   const [eggTypes, setEggTypes] = useState([]);
+  const [eggCategories, setEggCategories] = useState([]);
   const [deliveryOptions, setDeliveryOptions] = useState([]);
   const [livestockDeliveryOptions, setLivestockDeliveryOptions] = useState([]);
   const [livestockCategories, setLivestockCategories] = useState([]);
@@ -799,10 +805,21 @@ function AdminDashboard({ user, role }) {
     label: "",
     price: "",
     specialPrice: "",
+    categoryId: "",
   });
+  const [eggDraftImage, setEggDraftImage] = useState(null);
+  const [eggDraftPreview, setEggDraftPreview] = useState("");
+  const [eggImageUploads, setEggImageUploads] = useState({});
   const [eggEdits, setEggEdits] = useState({});
   const [eggMessage, setEggMessage] = useState("");
   const [eggError, setEggError] = useState("");
+  const [eggCategoryDraft, setEggCategoryDraft] = useState({
+    name: "",
+    description: "",
+    order: "",
+  });
+  const [eggCategoryMessage, setEggCategoryMessage] = useState("");
+  const [eggCategoryError, setEggCategoryError] = useState("");
 
   const [deliveryDraft, setDeliveryDraft] = useState({ label: "", cost: "" });
   const [deliveryEdits, setDeliveryEdits] = useState({});
@@ -830,6 +847,9 @@ function AdminDashboard({ user, role }) {
     specialPrice: "",
     categoryId: "",
   });
+  const [livestockDraftImage, setLivestockDraftImage] = useState(null);
+  const [livestockDraftPreview, setLivestockDraftPreview] = useState("");
+  const [livestockImageUploads, setLivestockImageUploads] = useState({});
   const [livestockEdits, setLivestockEdits] = useState({});
   const [livestockMessage, setLivestockMessage] = useState("");
   const [livestockError, setLivestockError] = useState("");
@@ -941,6 +961,30 @@ function AdminDashboard({ user, role }) {
   }, [voiceNote?.previewUrl]);
 
   useEffect(() => {
+    if (!eggDraftImage) {
+      setEggDraftPreview("");
+      return () => {};
+    }
+    const previewUrl = URL.createObjectURL(eggDraftImage);
+    setEggDraftPreview(previewUrl);
+    return () => {
+      URL.revokeObjectURL(previewUrl);
+    };
+  }, [eggDraftImage]);
+
+  useEffect(() => {
+    if (!livestockDraftImage) {
+      setLivestockDraftPreview("");
+      return () => {};
+    }
+    const previewUrl = URL.createObjectURL(livestockDraftImage);
+    setLivestockDraftPreview(previewUrl);
+    return () => {
+      URL.revokeObjectURL(previewUrl);
+    };
+  }, [livestockDraftImage]);
+
+  useEffect(() => {
     const unsubEggOrders = onSnapshot(
       query(collection(db, "eggOrders"), orderBy("createdAt", "desc")),
       (snapshot) => {
@@ -971,6 +1015,36 @@ function AdminDashboard({ user, role }) {
           ...docSnap.data(),
         }));
         setEggTypes(data);
+      }
+    );
+
+    const unsubEggCategories = onSnapshot(
+      query(collection(db, "eggCategories"), orderBy("order", "asc")),
+      (snapshot) => {
+        const data = snapshot.docs.map((docSnap) => {
+          const docData = docSnap.data();
+          const rawOrder = docData.order;
+          return {
+            id: docSnap.id,
+            name: docData.name ?? "",
+            description: docData.description ?? "",
+            order:
+              rawOrder === null || rawOrder === undefined ? "" : rawOrder,
+          };
+        });
+        const sorted = data
+          .slice()
+          .sort((a, b) => {
+            const aOrder = Number.isFinite(Number(a.order))
+              ? Number(a.order)
+              : Number.POSITIVE_INFINITY;
+            const bOrder = Number.isFinite(Number(b.order))
+              ? Number(b.order)
+              : Number.POSITIVE_INFINITY;
+            if (aOrder !== bOrder) return aOrder - bOrder;
+            return a.name.localeCompare(b.name);
+          });
+        setEggCategories(sorted);
       }
     );
 
@@ -1091,6 +1165,7 @@ function AdminDashboard({ user, role }) {
       unsubEggOrders();
       unsubLivestockOrders();
       unsubEggTypes();
+      unsubEggCategories();
       unsubDelivery();
       unsubLivestockDelivery();
       unsubLivestockCategories();
@@ -1182,6 +1257,42 @@ function AdminDashboard({ user, role }) {
       ? livestockDeliveryOptions
       : DEFAULT_LIVESTOCK_DELIVERY_OPTIONS;
   const resolvedEggTypes = eggTypes.length > 0 ? eggTypes : DEFAULT_EGG_TYPES;
+
+  const eggCategoryGroups = useMemo(() => {
+    const normalized = eggCategories.map((category) => ({
+      id: category.id,
+      name: category.name ?? "Unnamed",
+      description: category.description ?? "",
+      order:
+        category.order === null || category.order === undefined
+          ? ""
+          : category.order,
+    }));
+    const sorted = normalized
+      .slice()
+      .sort((a, b) => {
+        const aOrder = Number.isFinite(Number(a.order))
+          ? Number(a.order)
+          : Number.POSITIVE_INFINITY;
+        const bOrder = Number.isFinite(Number(b.order))
+          ? Number(b.order)
+          : Number.POSITIVE_INFINITY;
+        if (aOrder !== bOrder) return aOrder - bOrder;
+        return a.name.localeCompare(b.name);
+      });
+    const hasUncategorized = eggTypes.some((item) => {
+      if (!item.categoryId) return true;
+      return !eggCategories.some((category) => category.id === item.categoryId);
+    });
+    if (hasUncategorized) {
+      sorted.push({
+        id: UNCATEGORIZED_ID,
+        name: UNCATEGORIZED_LABEL,
+        description: "",
+      });
+    }
+    return sorted;
+  }, [eggCategories, eggTypes]);
 
   const applyOrderFilters = (orders) => {
     return orders
@@ -2066,6 +2177,131 @@ function AdminDashboard({ user, role }) {
     }
   };
 
+  const handleAddEggCategory = async () => {
+    setEggCategoryError("");
+    setEggCategoryMessage("");
+    if (!eggCategoryDraft.name.trim()) {
+      setEggCategoryError("Category name is required.");
+      return;
+    }
+    const orderValue = Number(eggCategoryDraft.order);
+    if (!Number.isFinite(orderValue) || orderValue < 1) {
+      setEggCategoryError("Order number is required.");
+      return;
+    }
+    try {
+      await addDoc(collection(db, "eggCategories"), {
+        name: eggCategoryDraft.name.trim(),
+        description: eggCategoryDraft.description.trim(),
+        order: orderValue,
+      });
+      setEggCategoryDraft({ name: "", description: "", order: "" });
+      setEggCategoryMessage("Category added.");
+    } catch (err) {
+      console.error("add egg category error", err);
+      setEggCategoryError("Unable to add category.");
+    }
+  };
+
+  const handleSaveEggCategory = async (category) => {
+    try {
+      const updates = {
+        name: category.name,
+        description: category.description ?? "",
+      };
+      const orderValue = Number(category.order);
+      if (Number.isFinite(orderValue) && orderValue > 0) {
+        updates.order = orderValue;
+      }
+      await updateDoc(doc(db, "eggCategories", category.id), updates);
+      setEggCategoryMessage("Category updated.");
+    } catch (err) {
+      console.error("save egg category error", err);
+    }
+  };
+
+  const handleDeleteEggCategory = async (category) => {
+    if (!window.confirm(`Delete category ${category.name}?`)) return;
+    try {
+      await deleteDoc(doc(db, "eggCategories", category.id));
+    } catch (err) {
+      console.error("delete egg category error", err);
+    }
+  };
+
+  const uploadTypeImage = async ({ variant, typeId, file }) => {
+    if (!file || !typeId) return "";
+    const safeName = sanitizeFileName(file.name);
+    const pathSegment = variant === "livestock" ? "livestock" : "egg";
+    const fileRef = storageRef(
+      storage,
+      `types/${pathSegment}/${typeId}/${Date.now()}_${safeName}`
+    );
+    await uploadBytes(fileRef, file, {
+      contentType: file.type || "image/jpeg",
+    });
+    const url = await getDownloadURL(fileRef);
+    const collectionName = variant === "livestock" ? "livestockTypes" : "eggTypes";
+    await updateDoc(doc(db, collectionName, typeId), {
+      imageUrl: url,
+      imageName: file.name ?? safeName,
+      imageUpdatedAt: serverTimestamp(),
+    });
+    return url;
+  };
+
+  const handleTypeImageUpload = async ({ variant, typeId, file }) => {
+    if (!file) return;
+    if (file.type && !file.type.startsWith("image/")) {
+      if (variant === "livestock") {
+        setLivestockError("Please upload an image file.");
+      } else {
+        setEggError("Please upload an image file.");
+      }
+      return;
+    }
+    const setUploads =
+      variant === "livestock" ? setLivestockImageUploads : setEggImageUploads;
+    const setMessage =
+      variant === "livestock" ? setLivestockMessage : setEggMessage;
+    const setError =
+      variant === "livestock" ? setLivestockError : setEggError;
+
+    setError("");
+    setMessage("");
+    setUploads((prev) => ({ ...prev, [typeId]: true }));
+    try {
+      await uploadTypeImage({ variant, typeId, file });
+      setMessage("Image uploaded.");
+    } catch (err) {
+      console.error("type image upload error", err);
+      setError("Unable to upload image.");
+    } finally {
+      setUploads((prev) => ({ ...prev, [typeId]: false }));
+    }
+  };
+
+  const handleRemoveTypeImage = async ({ variant, typeId }) => {
+    const setMessage =
+      variant === "livestock" ? setLivestockMessage : setEggMessage;
+    const setError =
+      variant === "livestock" ? setLivestockError : setEggError;
+    const collectionName = variant === "livestock" ? "livestockTypes" : "eggTypes";
+    setError("");
+    setMessage("");
+    try {
+      await updateDoc(doc(db, collectionName, typeId), {
+        imageUrl: "",
+        imageName: "",
+        imageUpdatedAt: serverTimestamp(),
+      });
+      setMessage("Image removed.");
+    } catch (err) {
+      console.error("remove image error", err);
+      setError("Unable to remove image.");
+    }
+  };
+
   const handleAddEggType = async () => {
     setEggError("");
     setEggMessage("");
@@ -2073,17 +2309,38 @@ function AdminDashboard({ user, role }) {
       setEggError("Label and price are required.");
       return;
     }
+    if (eggDraftImage && eggDraftImage.type && !eggDraftImage.type.startsWith("image/")) {
+      setEggError("Please upload an image file.");
+      return;
+    }
     try {
-      await addDoc(collection(db, "eggTypes"), {
+      const category = eggCategories.find(
+        (cat) => cat.id === eggDraft.categoryId
+      );
+      const created = await addDoc(collection(db, "eggTypes"), {
         label: eggDraft.label.trim(),
         price: Number(eggDraft.price),
         specialPrice: eggDraft.specialPrice
           ? Number(eggDraft.specialPrice)
           : null,
         order: eggTypes.length + 1,
+        categoryId: eggDraft.categoryId || "",
+        categoryName: category?.name ?? "",
         available: true,
       });
-      setEggDraft({ label: "", price: "", specialPrice: "" });
+      if (eggDraftImage) {
+        try {
+          await uploadTypeImage({
+            variant: "egg",
+            typeId: created.id,
+            file: eggDraftImage,
+          });
+        } catch (err) {
+          setEggError("Egg type added, but image upload failed.");
+        }
+      }
+      setEggDraft({ label: "", price: "", specialPrice: "", categoryId: "" });
+      setEggDraftImage(null);
       setEggMessage("Egg type added.");
     } catch (err) {
       console.error("add egg type error", err);
@@ -2120,6 +2377,9 @@ function AdminDashboard({ user, role }) {
         label: update.label,
         price: Number(update.price),
         specialPrice: update.specialPrice ? Number(update.specialPrice) : null,
+        categoryId: update.categoryId ?? "",
+        categoryName:
+          eggCategories.find((cat) => cat.id === update.categoryId)?.name ?? "",
       });
       setEggMessage("Egg type saved.");
     } catch (err) {
@@ -2244,11 +2504,19 @@ function AdminDashboard({ user, role }) {
       setLivestockError("Label and price are required.");
       return;
     }
+    if (
+      livestockDraftImage &&
+      livestockDraftImage.type &&
+      !livestockDraftImage.type.startsWith("image/")
+    ) {
+      setLivestockError("Please upload an image file.");
+      return;
+    }
     try {
       const category = livestockCategories.find(
         (cat) => cat.id === livestockDraft.categoryId
       );
-      await addDoc(collection(db, "livestockTypes"), {
+      const created = await addDoc(collection(db, "livestockTypes"), {
         label: livestockDraft.label.trim(),
         price: Number(livestockDraft.price),
         specialPrice: livestockDraft.specialPrice
@@ -2259,12 +2527,24 @@ function AdminDashboard({ user, role }) {
         categoryName: category?.name ?? "",
         available: true,
       });
+      if (livestockDraftImage) {
+        try {
+          await uploadTypeImage({
+            variant: "livestock",
+            typeId: created.id,
+            file: livestockDraftImage,
+          });
+        } catch (err) {
+          setLivestockError("Livestock item added, but image upload failed.");
+        }
+      }
       setLivestockDraft({
         label: "",
         price: "",
         specialPrice: "",
         categoryId: "",
       });
+      setLivestockDraftImage(null);
       setLivestockMessage("Livestock item added.");
     } catch (err) {
       console.error("add livestock item error", err);
@@ -3325,18 +3605,32 @@ function AdminDashboard({ user, role }) {
                 Egg types
               </p>
               <h2 className="text-xl font-bold text-brandGreen">
-                Manage breeds & prices
+                Categories & items
               </h2>
               <p className={mutedText}>
-                Add new breeds or update pricing/specials.
+                Add categories and egg types under them. These feed the egg
+                order form.
               </p>
             </div>
-            {eggMessage ? (
-              <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-800">
-                {eggMessage}
-              </span>
-            ) : null}
+            <div className="flex flex-wrap items-center gap-2">
+              {eggCategoryMessage ? (
+                <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-800">
+                  {eggCategoryMessage}
+                </span>
+              ) : null}
+              {eggMessage ? (
+                <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-800">
+                  {eggMessage}
+                </span>
+              ) : null}
+            </div>
           </div>
+
+          {eggCategoryError ? (
+            <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+              {eggCategoryError}
+            </div>
+          ) : null}
 
           {eggError ? (
             <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
@@ -3344,177 +3638,504 @@ function AdminDashboard({ user, role }) {
             </div>
           ) : null}
 
-          <div className="mt-4 grid gap-3 md:grid-cols-3">
-            <input
-              type="text"
-              value={eggDraft.label}
-              onChange={(event) =>
-                setEggDraft((prev) => ({ ...prev, label: event.target.value }))
-              }
-              placeholder="e.g. New Breed"
-              className={inputClass}
-            />
-            <input
-              type="number"
-              value={eggDraft.price}
-              onChange={(event) =>
-                setEggDraft((prev) => ({ ...prev, price: event.target.value }))
-              }
-              placeholder="Price"
-              className={inputClass}
-            />
-            <input
-              type="number"
-              value={eggDraft.specialPrice}
-              onChange={(event) =>
-                setEggDraft((prev) => ({
-                  ...prev,
-                  specialPrice: event.target.value,
-                }))
-              }
-              placeholder="Special price (optional)"
-              className={inputClass}
-            />
-          </div>
-          <div className="mt-3 flex justify-end">
-            <button
-              type="button"
-              onClick={handleAddEggType}
-              className="rounded-full bg-brandGreen px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:shadow-md"
-            >
-              Add egg type
-            </button>
-          </div>
-
-          <div className="mt-4 space-y-3">
-            {eggTypes.length === 0 ? (
-              <div className="rounded-xl border border-dashed border-brandGreen/30 bg-white/70 px-4 py-6 text-sm text-brandGreen/70">
-                No egg types found. Add one above to populate the order form.
-              </div>
-            ) : (
-              eggTypes.map((item) => {
-                const edit = eggEdits[item.id] ?? {
-                  label: item.label ?? "",
-                  price: item.price ?? 0,
-                  specialPrice: item.specialPrice ?? "",
-                };
-                const isAvailable = item.available !== false;
-                return (
-                  <div
-                    key={item.id}
-                    className={`rounded-xl border border-brandGreen/15 bg-white px-4 py-3 shadow-sm ${
-                      isAvailable ? "" : "opacity-70"
-                    }`}
+          <div className="mt-4 grid gap-3 md:grid-cols-[2fr_3fr]">
+            <div className="space-y-3 rounded-xl border border-brandGreen/15 bg-brandBeige/60 p-4">
+              <h3 className="text-sm font-semibold text-brandGreen">
+                Add category
+              </h3>
+              <div className="grid gap-2">
+                <input
+                  type="text"
+                  value={eggCategoryDraft.name}
+                  onChange={(event) =>
+                    setEggCategoryDraft((prev) => ({
+                      ...prev,
+                      name: event.target.value,
+                    }))
+                  }
+                  placeholder="e.g. Duck eggs"
+                  className={inputClass}
+                />
+                <input
+                  type="number"
+                  value={eggCategoryDraft.order}
+                  onChange={(event) =>
+                    setEggCategoryDraft((prev) => ({
+                      ...prev,
+                      order: event.target.value,
+                    }))
+                  }
+                  placeholder="Order (e.g. 1)"
+                  className={inputClass}
+                  min={1}
+                />
+                <textarea
+                  value={eggCategoryDraft.description}
+                  onChange={(event) =>
+                    setEggCategoryDraft((prev) => ({
+                      ...prev,
+                      description: event.target.value,
+                    }))
+                  }
+                  placeholder="Description (optional)"
+                  className={inputClass}
+                />
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    onClick={handleAddEggCategory}
+                    className="rounded-full bg-brandGreen px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:shadow-md"
                   >
-                    <div className="grid gap-2 md:grid-cols-4">
+                    Add
+                  </button>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                {eggCategories.map((category) => (
+                  <div
+                    key={category.id}
+                    className="space-y-2 rounded-lg border border-brandGreen/15 bg-white px-3 py-2"
+                  >
+                    <div className="grid gap-2 md:grid-cols-2">
                       <input
                         type="text"
-                        className={inputClass}
-                        value={edit.label}
+                        value={category.name}
                         onChange={(event) =>
-                          setEggEdits((prev) => ({
-                            ...prev,
-                            [item.id]: { ...edit, label: event.target.value },
-                          }))
+                          setEggCategories((prev) =>
+                            prev.map((item) =>
+                              item.id === category.id
+                                ? { ...item, name: event.target.value }
+                                : item
+                            )
+                          )
                         }
+                        className={inputClass}
                       />
                       <input
                         type="number"
-                        className={inputClass}
-                        value={edit.price}
+                        value={category.order ?? ""}
                         onChange={(event) =>
-                          setEggEdits((prev) => ({
-                            ...prev,
-                            [item.id]: { ...edit, price: event.target.value },
-                          }))
+                          setEggCategories((prev) =>
+                            prev.map((item) =>
+                              item.id === category.id
+                                ? { ...item, order: event.target.value }
+                                : item
+                            )
+                          )
                         }
-                      />
-                      <input
-                        type="number"
+                        placeholder="Order"
                         className={inputClass}
-                        value={edit.specialPrice}
-                        onChange={(event) =>
-                          setEggEdits((prev) => ({
-                            ...prev,
-                            [item.id]: {
-                              ...edit,
-                              specialPrice: event.target.value,
-                            },
-                          }))
-                        }
-                        placeholder="Special price"
+                        min={1}
                       />
-                      <div
-                        className="flex flex-wrap items-center gap-2 md:justify-end"
-                        onClick={(event) => event.stopPropagation()}
+                    </div>
+                    <textarea
+                      value={category.description ?? ""}
+                      onChange={(event) =>
+                        setEggCategories((prev) =>
+                          prev.map((item) =>
+                            item.id === category.id
+                              ? { ...item, description: event.target.value }
+                              : item
+                          )
+                        )
+                      }
+                      placeholder="Description (optional)"
+                      className={inputClass}
+                    />
+                    <div className="flex items-center justify-between">
+                      <button
+                        type="button"
+                        onClick={() => handleSaveEggCategory(category)}
+                        className="rounded-full bg-brandGreen px-3 py-1 text-xs font-semibold text-white shadow-sm transition hover:shadow-md"
                       >
-                        <span
-                          className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold ${
-                            isAvailable
-                              ? "bg-emerald-100 text-emerald-800 border border-emerald-200"
-                              : "bg-amber-100 text-amber-800 border border-amber-200"
-                          }`}
-                        >
-                          {isAvailable ? "Available" : "Unavailable"}
-                        </span>
-                        <div className="relative">
-                          <button
-                            type="button"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              toggleMenu(`egg-type-${item.id}`);
-                            }}
-                            aria-haspopup="menu"
-                            aria-expanded={openMenu === `egg-type-${item.id}`}
-                            className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-brandGreen text-white shadow-sm transition hover:shadow-md"
-                          >
-                            ...
-                          </button>
-                          {openMenu === `egg-type-${item.id}` ? (
-                            <div
-                              className="absolute right-0 z-20 mt-2 w-44 rounded-2xl border border-brandGreen/20 bg-white p-2 shadow-xl"
-                              onClick={(event) => event.stopPropagation()}
-                            >
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  handleSaveEggType(item.id);
-                                  setOpenMenu(null);
-                                }}
-                                className="w-full rounded-full px-3 py-2 text-left text-xs font-semibold text-brandGreen transition hover:bg-brandBeige"
-                              >
-                                Save
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  handleToggleEggAvailability(item);
-                                  setOpenMenu(null);
-                                }}
-                                className="w-full rounded-full px-3 py-2 text-left text-xs font-semibold text-brandGreen transition hover:bg-brandBeige"
-                              >
-                                {isAvailable
-                                  ? "Mark unavailable"
-                                  : "Mark available"}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  handleDeleteEggType(item.id);
-                                  setOpenMenu(null);
-                                }}
-                                className="w-full rounded-full px-3 py-2 text-left text-xs font-semibold text-red-700 transition hover:bg-red-50"
-                              >
-                                Delete
-                              </button>
-                            </div>
-                          ) : null}
-                        </div>
-                      </div>
+                        Save
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteEggCategory(category)}
+                        className="rounded-full border border-red-300 px-3 py-1 text-xs font-semibold text-red-700 transition hover:bg-red-50"
+                      >
+                        Delete
+                      </button>
                     </div>
                   </div>
-                );
-              })
+                ))}
+                {eggCategories.length === 0 ? (
+                  <p className={mutedText}>No categories yet.</p>
+                ) : null}
+              </div>
+            </div>
+
+            <div className="space-y-3 rounded-xl border border-brandGreen/15 bg-brandBeige/60 p-4">
+              <h3 className="text-sm font-semibold text-brandGreen">
+                Add egg type
+              </h3>
+              <div className="grid gap-2 md:grid-cols-2">
+                <input
+                  type="text"
+                  value={eggDraft.label}
+                  onChange={(event) =>
+                    setEggDraft((prev) => ({
+                      ...prev,
+                      label: event.target.value,
+                    }))
+                  }
+                  placeholder="e.g. New Breed"
+                  className={inputClass}
+                />
+                <select
+                  value={eggDraft.categoryId}
+                  onChange={(event) =>
+                    setEggDraft((prev) => ({
+                      ...prev,
+                      categoryId: event.target.value,
+                    }))
+                  }
+                  className={inputClass}
+                >
+                  <option value="">Select category</option>
+                  {eggCategories.map((category) => (
+                    <option key={category.id} value={category.id}>
+                      {category.name}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  type="number"
+                  value={eggDraft.price}
+                  onChange={(event) =>
+                    setEggDraft((prev) => ({
+                      ...prev,
+                      price: event.target.value,
+                    }))
+                  }
+                  placeholder="Price"
+                  className={inputClass}
+                />
+                <input
+                  type="number"
+                  value={eggDraft.specialPrice}
+                  onChange={(event) =>
+                    setEggDraft((prev) => ({
+                      ...prev,
+                      specialPrice: event.target.value,
+                    }))
+                  }
+                  placeholder="Special price (optional)"
+                  className={inputClass}
+                />
+                <div className="md:col-span-2 space-y-2">
+                  <label className="text-xs font-semibold text-brandGreen/70">
+                    Image (optional)
+                  </label>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    className="w-full rounded-lg border border-brandGreen/30 bg-white px-3 py-2 text-sm text-brandGreen file:mr-3 file:rounded-full file:border-0 file:bg-brandGreen file:px-3 file:py-1 file:text-xs file:font-semibold file:text-white"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0] ?? null;
+                      setEggDraftImage(file);
+                      event.target.value = "";
+                    }}
+                  />
+                  {eggDraftPreview ? (
+                    <div className="overflow-hidden rounded-lg border border-brandGreen/15 bg-white/80">
+                      <img
+                        src={eggDraftPreview}
+                        alt="Egg type preview"
+                        className="h-32 w-full object-cover"
+                      />
+                    </div>
+                  ) : (
+                    <p className="text-xs text-brandGreen/60">
+                      No image selected yet.
+                    </p>
+                  )}
+                </div>
+              </div>
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  onClick={handleAddEggType}
+                  className="rounded-full bg-brandGreen px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:shadow-md"
+                >
+                  Add egg type
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-4 space-y-3 rounded-xl border border-brandGreen/15 bg-white p-4 shadow-inner">
+            <h3 className="text-sm font-semibold text-brandGreen">
+              Existing egg types
+            </h3>
+            {eggTypes.length === 0 ? (
+              <p className={mutedText}>No egg types yet.</p>
+            ) : (
+              <div className="grid gap-3 md:grid-cols-2">
+                {eggCategoryGroups.map((category) => {
+                  const items =
+                    category.id === UNCATEGORIZED_ID
+                      ? eggTypes.filter((item) => {
+                          if (!item.categoryId) return true;
+                          return !eggCategories.some(
+                            (cat) => cat.id === item.categoryId
+                          );
+                        })
+                      : eggTypes.filter(
+                          (item) => item.categoryId === category.id
+                        );
+                  return (
+                    <div
+                      key={category.id}
+                      className="space-y-2 rounded-lg border border-brandGreen/15 bg-brandBeige/50 p-3"
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex flex-col">
+                          <p className="font-semibold text-brandGreen">
+                            {category.name}
+                          </p>
+                          {category.description ? (
+                            <p className="text-sm text-brandGreen/80">
+                              {category.description}
+                            </p>
+                          ) : null}
+                        </div>
+                        <span className="text-xs text-brandGreen/60">
+                          {items.length} item{items.length === 1 ? "" : "s"}
+                        </span>
+                      </div>
+                      {items.length === 0 ? (
+                        <p className={mutedText}>
+                          No egg types in this category.
+                        </p>
+                      ) : (
+                        items.map((item) => {
+                          const edit = eggEdits[item.id] ?? {
+                            label: item.label ?? "",
+                            price: item.price ?? 0,
+                            specialPrice: item.specialPrice ?? "",
+                            categoryId: item.categoryId ?? "",
+                          };
+                          const isAvailable = item.available !== false;
+                          return (
+                            <div
+                              key={item.id}
+                              className={`rounded-lg border border-brandGreen/15 bg-white px-3 py-2 shadow-sm ${
+                                isAvailable ? "" : "opacity-70"
+                              }`}
+                            >
+                              <div className="grid gap-2 md:grid-cols-2">
+                                <input
+                                  type="text"
+                                  value={edit.label}
+                                  onChange={(event) =>
+                                    setEggEdits((prev) => ({
+                                      ...prev,
+                                      [item.id]: {
+                                        ...edit,
+                                        label: event.target.value,
+                                      },
+                                    }))
+                                  }
+                                  className={inputClass}
+                                />
+                                <select
+                                  value={edit.categoryId}
+                                  onChange={(event) =>
+                                    setEggEdits((prev) => ({
+                                      ...prev,
+                                      [item.id]: {
+                                        ...edit,
+                                        categoryId: event.target.value,
+                                      },
+                                    }))
+                                  }
+                                  className={inputClass}
+                                >
+                                  <option value="">Select category</option>
+                                  {eggCategories.map((categoryOption) => (
+                                    <option
+                                      key={categoryOption.id}
+                                      value={categoryOption.id}
+                                    >
+                                      {categoryOption.name}
+                                    </option>
+                                  ))}
+                                </select>
+                                <input
+                                  type="number"
+                                  value={edit.price}
+                                  onChange={(event) =>
+                                    setEggEdits((prev) => ({
+                                      ...prev,
+                                      [item.id]: {
+                                        ...edit,
+                                        price: event.target.value,
+                                      },
+                                    }))
+                                  }
+                                  className={inputClass}
+                                />
+                                <input
+                                  type="number"
+                                  value={edit.specialPrice}
+                                  onChange={(event) =>
+                                    setEggEdits((prev) => ({
+                                      ...prev,
+                                      [item.id]: {
+                                        ...edit,
+                                        specialPrice: event.target.value,
+                                      },
+                                    }))
+                                  }
+                                  className={inputClass}
+                                  placeholder="Special price"
+                                />
+                              </div>
+                              <div
+                                className="mt-2 flex flex-wrap items-center gap-2"
+                                onClick={(event) => event.stopPropagation()}
+                              >
+                                <span
+                                  className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold ${
+                                    isAvailable
+                                      ? "bg-emerald-100 text-emerald-800 border border-emerald-200"
+                                      : "bg-amber-100 text-amber-800 border border-amber-200"
+                                  }`}
+                                >
+                                  {isAvailable ? "Available" : "Unavailable"}
+                                </span>
+                                <div className="relative">
+                                  <button
+                                    type="button"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      toggleMenu(`egg-type-${item.id}`);
+                                    }}
+                                    aria-haspopup="menu"
+                                    aria-expanded={
+                                      openMenu === `egg-type-${item.id}`
+                                    }
+                                    className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-brandGreen text-white shadow-sm transition hover:shadow-md"
+                                  >
+                                    ...
+                                  </button>
+                                  {openMenu === `egg-type-${item.id}` ? (
+                                    <div
+                                      className="absolute right-0 z-20 mt-2 w-44 rounded-2xl border border-brandGreen/20 bg-white p-2 shadow-xl"
+                                      onClick={(event) =>
+                                        event.stopPropagation()
+                                      }
+                                    >
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          handleSaveEggType(item.id);
+                                          setOpenMenu(null);
+                                        }}
+                                        className="w-full rounded-full px-3 py-2 text-left text-xs font-semibold text-brandGreen transition hover:bg-brandBeige"
+                                      >
+                                        Save
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          handleToggleEggAvailability(item);
+                                          setOpenMenu(null);
+                                        }}
+                                        className="w-full rounded-full px-3 py-2 text-left text-xs font-semibold text-brandGreen transition hover:bg-brandBeige"
+                                      >
+                                        {isAvailable
+                                          ? "Mark unavailable"
+                                          : "Mark available"}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          handleDeleteEggType(item.id);
+                                          setOpenMenu(null);
+                                        }}
+                                        className="w-full rounded-full px-3 py-2 text-left text-xs font-semibold text-red-700 transition hover:bg-red-50"
+                                      >
+                                        Delete
+                                      </button>
+                                    </div>
+                                  ) : null}
+                                </div>
+                              </div>
+                              <div className="mt-3 space-y-2 rounded-lg border border-brandGreen/10 bg-brandCream/70 px-3 py-3">
+                                <p className="text-xs font-semibold text-brandGreen/70">
+                                  Image
+                                </p>
+                                <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                                  <div className="flex items-center gap-3">
+                                    <div className="h-16 w-20 overflow-hidden rounded-lg border border-brandGreen/15 bg-white/80">
+                                      {item.imageUrl ? (
+                                        <img
+                                          src={item.imageUrl}
+                                          alt={item.label ?? "Egg image"}
+                                          className="h-full w-full object-cover"
+                                        />
+                                      ) : (
+                                        <div className="flex h-full w-full items-center justify-center text-[11px] text-brandGreen/50">
+                                          No image
+                                        </div>
+                                      )}
+                                    </div>
+                                    <div className="flex flex-col gap-1">
+                                      <input
+                                        type="file"
+                                        accept="image/*"
+                                        disabled={Boolean(
+                                          eggImageUploads[item.id]
+                                        )}
+                                        className="w-full rounded-lg border border-brandGreen/30 bg-white px-3 py-2 text-xs text-brandGreen file:mr-2 file:rounded-full file:border-0 file:bg-brandGreen file:px-3 file:py-1 file:text-[10px] file:font-semibold file:text-white"
+                                        onChange={(event) => {
+                                          const file =
+                                            event.target.files?.[0] ?? null;
+                                          if (file) {
+                                            handleTypeImageUpload({
+                                              variant: "egg",
+                                              typeId: item.id,
+                                              file,
+                                            });
+                                          }
+                                          event.target.value = "";
+                                        }}
+                                      />
+                                      {eggImageUploads[item.id] ? (
+                                        <span className="text-[11px] text-brandGreen/60">
+                                          Uploading...
+                                        </span>
+                                      ) : null}
+                                    </div>
+                                  </div>
+                                  {item.imageUrl ? (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        handleRemoveTypeImage({
+                                          variant: "egg",
+                                          typeId: item.id,
+                                        })
+                                      }
+                                      className="rounded-full border border-red-300 px-3 py-1 text-xs font-semibold text-red-700 transition hover:bg-red-50"
+                                    >
+                                      Remove image
+                                    </button>
+                                  ) : null}
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
             )}
           </div>
         </div>
@@ -3780,6 +4401,34 @@ function AdminDashboard({ user, role }) {
                   placeholder="Special price (optional)"
                   className={inputClass}
                 />
+                <div className="md:col-span-2 space-y-2">
+                  <label className="text-xs font-semibold text-brandGreen/70">
+                    Image (optional)
+                  </label>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    className="w-full rounded-lg border border-brandGreen/30 bg-white px-3 py-2 text-sm text-brandGreen file:mr-3 file:rounded-full file:border-0 file:bg-brandGreen file:px-3 file:py-1 file:text-xs file:font-semibold file:text-white"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0] ?? null;
+                      setLivestockDraftImage(file);
+                      event.target.value = "";
+                    }}
+                  />
+                  {livestockDraftPreview ? (
+                    <div className="overflow-hidden rounded-lg border border-brandGreen/15 bg-white/80">
+                      <img
+                        src={livestockDraftPreview}
+                        alt="Livestock preview"
+                        className="h-32 w-full object-cover"
+                      />
+                    </div>
+                  ) : (
+                    <p className="text-xs text-brandGreen/60">
+                      No image selected yet.
+                    </p>
+                  )}
+                </div>
               </div>
               <div className="flex justify-end">
                 <button
@@ -3974,6 +4623,69 @@ function AdminDashboard({ user, role }) {
                                         Delete
                                       </button>
                                     </div>
+                                  ) : null}
+                                </div>
+                              </div>
+                              <div className="mt-3 space-y-2 rounded-lg border border-brandGreen/10 bg-brandCream/70 px-3 py-3">
+                                <p className="text-xs font-semibold text-brandGreen/70">
+                                  Image
+                                </p>
+                                <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                                  <div className="flex items-center gap-3">
+                                    <div className="h-16 w-20 overflow-hidden rounded-lg border border-brandGreen/15 bg-white/80">
+                                      {item.imageUrl ? (
+                                        <img
+                                          src={item.imageUrl}
+                                          alt={item.label ?? "Livestock image"}
+                                          className="h-full w-full object-cover"
+                                        />
+                                      ) : (
+                                        <div className="flex h-full w-full items-center justify-center text-[11px] text-brandGreen/50">
+                                          No image
+                                        </div>
+                                      )}
+                                    </div>
+                                    <div className="flex flex-col gap-1">
+                                      <input
+                                        type="file"
+                                        accept="image/*"
+                                        disabled={Boolean(
+                                          livestockImageUploads[item.id]
+                                        )}
+                                        className="w-full rounded-lg border border-brandGreen/30 bg-white px-3 py-2 text-xs text-brandGreen file:mr-2 file:rounded-full file:border-0 file:bg-brandGreen file:px-3 file:py-1 file:text-[10px] file:font-semibold file:text-white"
+                                        onChange={(event) => {
+                                          const file =
+                                            event.target.files?.[0] ?? null;
+                                          if (file) {
+                                            handleTypeImageUpload({
+                                              variant: "livestock",
+                                              typeId: item.id,
+                                              file,
+                                            });
+                                          }
+                                          event.target.value = "";
+                                        }}
+                                      />
+                                      {livestockImageUploads[item.id] ? (
+                                        <span className="text-[11px] text-brandGreen/60">
+                                          Uploading...
+                                        </span>
+                                      ) : null}
+                                    </div>
+                                  </div>
+                                  {item.imageUrl ? (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        handleRemoveTypeImage({
+                                          variant: "livestock",
+                                          typeId: item.id,
+                                        })
+                                      }
+                                      className="rounded-full border border-red-300 px-3 py-1 text-xs font-semibold text-red-700 transition hover:bg-red-50"
+                                    >
+                                      Remove image
+                                    </button>
                                   ) : null}
                                 </div>
                               </div>
