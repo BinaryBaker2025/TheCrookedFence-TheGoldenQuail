@@ -7,12 +7,12 @@ service firebase.storage {
 
     function isBootstrapAdmin() {
       return isSignedIn() &&
-        request.auth.token.email != null &&
+          request.auth.token.email != null &&
         (
-          request.auth.token.email.toLowerCase() == "bradsgbaker14@gmail.com" ||
-          request.auth.token.email.toLowerCase() == "admin@thecrookedfence.co.za" ||
-          request.auth.token.email.toLowerCase() == "stolschristopher60@gmail.com" ||
-          request.auth.token.email.toLowerCase() == "bradley@binarybaker.co.za"
+          request.auth.token.email.lower() == "bradsgbaker14@gmail.com" ||
+          request.auth.token.email.lower() == "admin@thecrookedfence.co.za" ||
+          request.auth.token.email.lower() == "stolschristopher60@gmail.com" ||
+          request.auth.token.email.lower() == "bradley@binarybaker.co.za"
         );
     }
 
@@ -25,8 +25,12 @@ service firebase.storage {
         );
     }
 
+    function isWorker() {
+      return isSignedIn() && request.auth.token.role == "worker";
+    }
+
     match /orders/{collection}/{orderId}/{fileName} {
-      allow read, write: if isSignedIn();
+      allow read, write: if isAdmin() || isWorker();
     }
 
     match /finance/{fileName} {
@@ -40,7 +44,20 @@ service firebase.storage {
 
     match /types/{typeGroup}/{typeId}/{fileName} {
       allow read: if true;
-      allow write: if isSignedIn() && (typeGroup == "egg" || typeGroup == "livestock");
+      allow write: if (isAdmin() || isWorker()) && (typeGroup == "egg" || typeGroup == "livestock");
+    }
+
+    match /type-library/{assetId}/{fileName} {
+      allow read: if true;
+      allow write: if isAdmin() || isWorker();
+    }
+
+    match /operations/tasks/{taskId}/{fileName} {
+      allow read, write: if isAdmin();
+    }
+
+    match /operations/events/{eventId}/{fileName} {
+      allow read, write: if isAdmin();
     }
   }
 }

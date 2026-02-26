@@ -13,3 +13,15 @@ body {
   min-height: 100vh;
   background-color: #f7f4eb;
 }
+
+/* Hide native number steppers because qty controls have custom arrows. */
+.qty-stepper-input {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+.qty-stepper-input::-webkit-inner-spin-button,
+.qty-stepper-input::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}

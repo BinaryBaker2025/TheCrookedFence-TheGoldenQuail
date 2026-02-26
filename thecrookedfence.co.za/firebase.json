@@ -12,13 +12,18 @@
     ],
     "rewrites": [
       {
+        "source": "/sitemap.xml",
+        "function": "sitemap"
+      },
+      {
         "source": "**",
         "destination": "/index.html"
       }
     ]
   },
   "firestore": {
-    "rules": "firestore.rules"
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
   },
   "storage": {
     "rules": "storage.rules"
