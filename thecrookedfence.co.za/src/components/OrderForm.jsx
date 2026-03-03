@@ -15,7 +15,6 @@ import {
   UNCATEGORIZED_LABEL,
 } from "../data/defaults.js";
 import { normalizeTypeDoc } from "../lib/typeCatalog.js";
-import { useDraftPersistence } from "../hooks/useDraftPersistence.js";
 import { useNetworkStatus } from "../hooks/useNetworkStatus.js";
 import { useSubmissionQueue } from "../hooks/useSubmissionQueue.js";
 import { Banner, Button, Dialog, ErrorMessage } from "./ui/index.js";
@@ -41,8 +40,6 @@ const indemnityText =
 const indemnityAcceptanceText = "I have read and accept the indemnity terms.";
 const eggRestNoticeText =
   "Important: Hatching eggs must rest for at least 24 hours at room temperature before incubation.";
-const ORDER_DRAFT_SCHEMA_VERSION = 2;
-const ORDER_DRAFT_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 
 const createClientKey = () => {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -56,6 +53,7 @@ const createDefaultForm = (isLivestock) => ({
   surname: "",
   email: "",
   whatsapp: "",
+  whatsappMatchesCellphone: true,
   countryCode: "+27",
   cellphone: "",
   streetAddress: "",
@@ -180,15 +178,6 @@ const VALIDATION_ORDER = [
   "indemnity",
 ];
 
-const createInitialDraftState = (isLivestock) => ({
-  form: createDefaultForm(isLivestock),
-  quantities: {},
-  indemnityAccepted: false,
-  idempotencyKey: createClientKey(),
-  draftId: null,
-  resumeToken: "",
-});
-
 export default function OrderForm({ variant = "eggs" }) {
   const isLivestock = variant === "livestock";
   const pageTitle = isLivestock
@@ -199,89 +188,46 @@ export default function OrderForm({ variant = "eggs" }) {
     : "Egg types & quantities";
   const itemLabel = isLivestock ? "livestock type" : "egg type";
   const dateLabel = isLivestock
-    ? "Preferred delivery/need-by date*"
-    : "Send date*";
-  const dateFormatHint = "Use DD/MM/YYYY or YYYY/MM/DD.";
+    ? "Preferred delivery/need-by date (optional)"
+    : "Send date (optional)";
+  const dateFormatHint = "Open the calendar and choose the date.";
   const dateHelper = isLivestock
-    ? `Enter your preferred delivery or need-by date. ${dateFormatHint}`
-    : dateFormatHint;
+    ? `Optional. Enter your preferred delivery or need-by date. ${dateFormatHint}`
+    : `Optional. ${dateFormatHint}`;
   const typeDetailBase = isLivestock ? "/livestock" : "/eggs";
   const navigate = useNavigate();
 
   const initialItems = [];
-  const initialDraftState = useMemo(
-    () => createInitialDraftState(isLivestock),
-    [isLivestock]
-  );
   const { isOnline, statusLabel } = useNetworkStatus();
   const { isRetrying, runWithRetry } = useSubmissionQueue();
-  const {
-    value: persistedDraft,
-    setValue: setPersistedDraft,
-    clearDraft,
-    lastSavedAt,
-  } = useDraftPersistence({
-    storageKey: `tcf_public_order_${variant}`,
-    initialValue: initialDraftState,
-    schemaVersion: ORDER_DRAFT_SCHEMA_VERSION,
-    ttlMs: ORDER_DRAFT_TTL_MS,
-    debounceMs: 500,
-  });
-  const normalizedDraftForm = {
-    ...createDefaultForm(isLivestock),
-    ...(persistedDraft?.form || {}),
-  };
-  const normalizedDraftQuantities =
-    persistedDraft?.quantities && typeof persistedDraft.quantities === "object"
-      ? persistedDraft.quantities
-      : {};
   const createPublicOrderCallable = useMemo(
     () => httpsCallable(cloudFunctions, "createPublicOrder"),
-    []
-  );
-  const savePublicOrderDraftCallable = useMemo(
-    () => httpsCallable(cloudFunctions, "savePublicOrderDraft"),
-    []
-  );
-  const resumePublicOrderDraftCallable = useMemo(
-    () => httpsCallable(cloudFunctions, "resumePublicOrderDraft"),
     []
   );
 
   const [items, setItems] = useState(initialItems);
   const [categories, setCategories] = useState([]);
-  const [form, setForm] = useState(normalizedDraftForm);
+  const [form, setForm] = useState(() => createDefaultForm(isLivestock));
   const [deliveryOptions, setDeliveryOptions] = useState(
     isLivestock
       ? DEFAULT_LIVESTOCK_DELIVERY_OPTIONS
       : DEFAULT_FORM_DELIVERY_OPTIONS
   );
-  const [quantities, setQuantities] = useState(() =>
-    toQuantityMap(initialItems, normalizedDraftQuantities)
-  );
+  const [quantities, setQuantities] = useState(() => toQuantityMap(initialItems));
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [isSavingDraft, setIsSavingDraft] = useState(false);
-  const [isResumingDraft, setIsResumingDraft] = useState(false);
   const [queuedPayload, setQueuedPayload] = useState(null);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [orderNumber, setOrderNumber] = useState(null);
-  const [indemnityAccepted, setIndemnityAccepted] = useState(
-    Boolean(persistedDraft?.indemnityAccepted)
-  );
-  const [draftId, setDraftId] = useState(
-    persistedDraft?.draftId ? String(persistedDraft.draftId) : null
-  );
-  const [resumeToken, setResumeToken] = useState(
-    persistedDraft?.resumeToken ? String(persistedDraft.resumeToken) : ""
-  );
-  const [idempotencyKey, setIdempotencyKey] = useState(
-    persistedDraft?.idempotencyKey ? String(persistedDraft.idempotencyKey) : createClientKey()
-  );
+  const [modalTitle, setModalTitle] = useState("Order placed");
+  const [modalMessage, setModalMessage] = useState("");
+  const [modalNote, setModalNote] = useState("");
+  const [indemnityAccepted, setIndemnityAccepted] = useState(true);
+  const [idempotencyKey, setIdempotencyKey] = useState(() => createClientKey());
   const [fieldErrors, setFieldErrors] = useState({});
   const fieldRefs = useRef({});
-  const hasServerResumeAttempted = useRef(false);
+  const sendDatePickerRef = useRef(null);
 
   useEffect(() => {
     const ref = collection(db, isLivestock ? "livestockTypes" : "eggTypes");
@@ -439,13 +385,21 @@ export default function OrderForm({ variant = "eggs" }) {
   const total = subtotal + deliveryCost;
 
   const setField = (field, value) => {
+    const shouldClearContactErrors =
+      field === "email" ||
+      field === "whatsapp" ||
+      field === "whatsappMatchesCellphone" ||
+      (form.whatsappMatchesCellphone &&
+        (field === "cellphone" || field === "countryCode"));
+
     setForm((prev) => ({ ...prev, [field]: value }));
     setFieldErrors((prev) => {
       if (
         !prev[field] &&
         !(field === "deliveryOption" && prev.otherDelivery && value !== "other") &&
         !(field === "email" && prev.whatsapp) &&
-        !(field === "whatsapp" && prev.email)
+        !(field === "whatsapp" && prev.email) &&
+        !shouldClearContactErrors
       ) {
         return prev;
       }
@@ -454,50 +408,13 @@ export default function OrderForm({ variant = "eggs" }) {
       if (field === "deliveryOption" && value !== "other") {
         delete next.otherDelivery;
       }
-      if (field === "email" || field === "whatsapp") {
+      if (shouldClearContactErrors) {
         delete next.email;
         delete next.whatsapp;
       }
       return next;
     });
   };
-
-  const hasDraftContent = useMemo(() => {
-    const hasSelectedItems = Object.values(quantities).some(
-      (qty) => Number(qty) > 0
-    );
-    return (
-      hasSelectedItems ||
-      Boolean(form.name.trim()) ||
-      Boolean(form.surname.trim()) ||
-      Boolean(form.email.trim()) ||
-      Boolean(form.whatsapp.trim()) ||
-      Boolean(form.streetAddress.trim()) ||
-      Boolean(form.city.trim()) ||
-      Boolean(form.province.trim()) ||
-      Boolean(form.postalCode.trim()) ||
-      Boolean(form.sendDate.trim())
-    );
-  }, [form, quantities]);
-
-  useEffect(() => {
-    setPersistedDraft({
-      form,
-      quantities,
-      indemnityAccepted,
-      idempotencyKey,
-      draftId,
-      resumeToken,
-    });
-  }, [
-    draftId,
-    form,
-    idempotencyKey,
-    indemnityAccepted,
-    quantities,
-    resumeToken,
-    setPersistedDraft,
-  ]);
 
   const clearFieldError = (field) => {
     setFieldErrors((prev) => {
@@ -510,15 +427,19 @@ export default function OrderForm({ variant = "eggs" }) {
 
   const formatCellphone = () => {
     const countryDigits = form.countryCode.replace(/[^\d]/g, "");
-    const prefix = countryDigits ? `+${countryDigits}` : "";
     const localDigits = normalizePhoneDigits(form.cellphone);
+    if (!localDigits) return "";
+    const prefix = countryDigits ? `+${countryDigits}` : "";
     return [prefix, localDigits].filter(Boolean).join(" ").trim();
   };
 
+  const getWhatsappNumber = (cellphone = formatCellphone()) =>
+    form.whatsappMatchesCellphone ? cellphone : form.whatsapp.trim();
+
   const buildValidationMessage = (errors, firstInvalidField) => {
     if (!firstInvalidField) return "Please fill in all required fields.";
-    if (firstInvalidField === "sendDate" && errors.sendDate === "invalid") {
-      return "Please use DD/MM/YYYY or YYYY/MM/DD for the send date.";
+    if (firstInvalidField === "sendDate") {
+      return "Please choose a valid send date from the calendar.";
     }
     if (firstInvalidField === "items") {
       return `Please order at least one ${itemLabel} (quantities above 0).`;
@@ -548,7 +469,7 @@ export default function OrderForm({ variant = "eggs" }) {
   const validate = () => {
     const nextErrors = {};
     const email = form.email.trim();
-    const whatsapp = form.whatsapp.trim();
+    const whatsapp = getWhatsappNumber();
     const sendDateInput = form.sendDate.trim();
     const parsedSendDate = parseOrderDateInput(sendDateInput);
     if (
@@ -560,10 +481,8 @@ export default function OrderForm({ variant = "eggs" }) {
       !form.city.trim() ||
       !form.province.trim() ||
       !form.postalCode.trim() ||
-      !form.deliveryOption ||
-      !sendDateInput
+      !form.deliveryOption
     ) {
-      if (!sendDateInput) nextErrors.sendDate = "required";
       if (!form.name.trim()) nextErrors.name = "required";
       if (!form.surname.trim()) nextErrors.surname = "required";
       if (!form.countryCode.trim()) nextErrors.countryCode = "required";
@@ -574,7 +493,7 @@ export default function OrderForm({ variant = "eggs" }) {
       if (!form.postalCode.trim()) nextErrors.postalCode = "required";
       if (!form.deliveryOption) nextErrors.deliveryOption = "required";
     }
-    if (!email && !whatsapp) {
+    if (!form.whatsappMatchesCellphone && !email && !whatsapp) {
       nextErrors.email = "requiredEither";
       nextErrors.whatsapp = "requiredEither";
     }
@@ -587,7 +506,7 @@ export default function OrderForm({ variant = "eggs" }) {
     if (form.cellphone.trim() && !isValidCellphone(form.cellphone)) {
       nextErrors.cellphone = "invalid";
     }
-    if (whatsapp && !isValidWhatsapp(whatsapp)) {
+    if (!form.whatsappMatchesCellphone && whatsapp && !isValidWhatsapp(whatsapp)) {
       nextErrors.whatsapp = "invalid";
     }
     if (selectedItems.length === 0) {
@@ -835,137 +754,53 @@ export default function OrderForm({ variant = "eggs" }) {
     onlineStatus: isOnline ? "online" : "offline",
   });
 
-  const buildDraftPayload = () => ({
-    form,
-    quantities,
-    indemnityAccepted,
-  });
-
-  const applyDraftPayload = (draftPayload) => {
-    if (!draftPayload || typeof draftPayload !== "object") return;
-    const nextForm = {
-      ...createDefaultForm(isLivestock),
-      ...(draftPayload.form || {}),
-    };
-    setForm(nextForm);
-    setQuantities(
-      toQuantityMap(items, draftPayload.quantities || normalizedDraftQuantities)
-    );
-    setIndemnityAccepted(Boolean(draftPayload.indemnityAccepted));
+  const handleSendDateChange = (event) => {
+    const parsed = parseOrderDateInput(event.target.value);
+    if (parsed) {
+      setField("sendDate", parsed.dayMonthYear);
+      return;
+    }
+    setField("sendDate", "");
   };
 
-  const saveDraftToServer = useCallback(async () => {
-    if (!isOnline) {
-      setError("You are offline. Reconnect to save this draft to the server.");
+  const openSendDatePicker = () => {
+    const picker = sendDatePickerRef.current;
+    if (!picker) return;
+    if (typeof picker.showPicker === "function") {
+      picker.showPicker();
+    }
+  };
+
+  const handleSendDateKeyDown = (event) => {
+    if (event.key === "Tab") return;
+    if (event.key === "Enter" || event.key === " " || event.key === "ArrowDown") {
+      event.preventDefault();
+      openSendDatePicker();
       return;
     }
-    if (!hasDraftContent) {
-      setError("Start your order first, then save it to the server.");
-      return;
-    }
-
-    setError("");
-    setIsSavingDraft(true);
-    try {
-      const response = await savePublicOrderDraftCallable({
-        formType: variant,
-        draftId,
-        resumeToken,
-        draft: buildDraftPayload(),
-        clientMeta: buildClientMeta(),
-      });
-      const payload = response?.data || {};
-      const nextDraftId = String(payload.draftId || draftId || "").trim();
-      const nextResumeToken = String(payload.resumeToken || resumeToken || "").trim();
-      if (nextDraftId) {
-        setDraftId(nextDraftId);
-      }
-      if (nextResumeToken) {
-        setResumeToken(nextResumeToken);
-      }
-      setSuccess("Draft saved. You can safely return later on this device.");
-      logEvent("order_draft_saved", {
-        variant,
-        draftId: nextDraftId,
-        hasResumeToken: Boolean(nextResumeToken),
-      });
-    } catch (err) {
-      logError("order_draft_save_failed", err, { variant, draftId });
-      setError("We could not save your draft right now. Please try again.");
-    } finally {
-      setIsSavingDraft(false);
-    }
-  }, [
-    draftId,
-    hasDraftContent,
-    isOnline,
-    resumeToken,
-    savePublicOrderDraftCallable,
-    variant,
-  ]);
-
-  const resumeDraftFromServer = useCallback(async () => {
-    if (!isOnline) {
-      setError("You are offline. Reconnect to resume your server draft.");
-      return;
-    }
-    if (!draftId || !resumeToken) {
-      setError("No server draft token found yet on this device.");
-      return;
-    }
-
-    setError("");
-    setIsResumingDraft(true);
-    try {
-      const response = await resumePublicOrderDraftCallable({
-        draftId,
-        resumeToken,
-      });
-      const payload = response?.data || {};
-      applyDraftPayload(payload.draft || {});
-      setSuccess("Server draft restored.");
-      logEvent("order_draft_resumed", { variant, draftId });
-    } catch (err) {
-      logError("order_draft_resume_failed", err, { variant, draftId });
-      setError("We could not restore your server draft. Please try again.");
-    } finally {
-      setIsResumingDraft(false);
-    }
-  }, [draftId, isOnline, resumePublicOrderDraftCallable, resumeToken, variant]);
-
-  useEffect(() => {
-    if (hasServerResumeAttempted.current) return;
-    if (!isOnline || !draftId || !resumeToken || hasDraftContent) return;
-    hasServerResumeAttempted.current = true;
-    void resumeDraftFromServer();
-  }, [
-    draftId,
-    hasDraftContent,
-    isOnline,
-    resumeDraftFromServer,
-    resumeToken,
-  ]);
+    event.preventDefault();
+  };
 
   const buildSubmissionPayload = () => {
     const parsedSendDate = parseOrderDateInput(form.sendDate);
-    if (!parsedSendDate) {
+    if (form.sendDate.trim() && !parsedSendDate) {
       throw new Error("Invalid send date");
     }
 
     const selectedDelivery = selectedDeliveryOption;
     const email = form.email.trim();
-    const whatsapp = form.whatsapp.trim();
+    const cellphone = formatCellphone();
+    const whatsapp = getWhatsappNumber(cellphone);
     return {
       formType: variant,
       idempotencyKey,
-      draftId,
       submittedAtClient: new Date().toISOString(),
       contact: {
         name: form.name.trim(),
         surname: form.surname.trim(),
         email,
         whatsapp,
-        cellphone: formatCellphone(),
+        cellphone,
       },
       address: {
         streetAddress: form.streetAddress.trim(),
@@ -984,7 +819,7 @@ export default function OrderForm({ variant = "eggs" }) {
         deliveryCost: selectedDelivery?.cost ?? 0,
         otherDelivery:
           form.deliveryOption === "other" ? form.otherDelivery.trim() : "",
-        sendDate: parsedSendDate.iso,
+        sendDate: parsedSendDate?.iso ?? "",
       },
       lineItems: selectedItems.map((item) => ({
         id: item.id,
@@ -1001,18 +836,6 @@ export default function OrderForm({ variant = "eggs" }) {
       indemnityAccepted,
       clientMeta: buildClientMeta(),
     };
-  };
-
-  const clearOrderStateAfterSubmit = () => {
-    setForm(createDefaultForm(isLivestock));
-    setQuantities(toQuantityMap(items, {}));
-    setIndemnityAccepted(false);
-    setFieldErrors({});
-    setQueuedPayload(null);
-    setDraftId(null);
-    setResumeToken("");
-    setIdempotencyKey(createClientKey());
-    clearDraft();
   };
 
   const createOrder = useCallback(
@@ -1033,29 +856,59 @@ export default function OrderForm({ variant = "eggs" }) {
         const result = response?.data || {};
         const createdOrderNumber = String(result.orderNumber || "").trim();
         const status = result.status === "duplicate" ? "duplicate" : "created";
+        const customerEmailStatus = String(
+          result.customerEmailStatus || "not_requested"
+        ).trim();
         setOrderNumber(createdOrderNumber || null);
-        setSuccess(
-          status === "duplicate"
-            ? createdOrderNumber
+        if (status === "duplicate") {
+          setModalTitle("Order already received");
+          setModalMessage(
+            createdOrderNumber
               ? `This order was already received as ${createdOrderNumber}.`
               : "This order was already received."
-            : createdOrderNumber
-            ? `Order submitted! Your order number is ${createdOrderNumber}. Please use it as your payment reference.`
-            : "Order submitted successfully! Thank you for your support."
-        );
+          );
+          setModalNote("Please use your order number as your payment reference.");
+        } else if (customerEmailStatus === "failed") {
+          setModalTitle("Order placed");
+          setModalMessage(
+            "Your order has been placed, but we could not send the confirmation email."
+          );
+          setModalNote(
+            "Please contact admin on WhatsApp or email if you do not hear from us shortly."
+          );
+        } else if (payload.contact.email) {
+          setModalTitle("Order placed");
+          setModalMessage(
+            "Your order has been placed. A confirmation email will be sent shortly."
+          );
+          setModalNote("Please use your order number as your payment reference.");
+        } else {
+          setModalTitle("Order placed");
+          setModalMessage(
+            "Your order has been placed. We will use the contact details you provided to keep you updated."
+          );
+          setModalNote("Please use your order number as your payment reference.");
+        }
+        setSuccess("");
         setIsModalOpen(true);
-        clearOrderStateAfterSubmit();
+        setForm(createDefaultForm(isLivestock));
+        setQuantities(toQuantityMap(items, {}));
+        setIndemnityAccepted(true);
+        setFieldErrors({});
+        setQueuedPayload(null);
+        setIdempotencyKey(createClientKey());
         logEvent("order_submit_success", {
           variant,
           status,
           hasOrderNumber: Boolean(createdOrderNumber),
+          customerEmailStatus,
         });
       } catch (err) {
         logError("order_submit_failed", err, { variant });
         const code = String(err?.code || "").toLowerCase();
         if (code.includes("permission-denied")) {
           setError(
-            "Your order could not be submitted right now. Please contact support via WhatsApp."
+            "Your order could not be submitted right now. Please contact admin on WhatsApp or email."
           );
         } else if (code.includes("invalid-argument")) {
           setError(
@@ -1063,16 +916,24 @@ export default function OrderForm({ variant = "eggs" }) {
           );
         } else if (code.includes("unavailable")) {
           setError(
-            "Network is unstable. Please try again in a moment. Your details are still saved."
+            "Network is unstable. Please keep this page open and try again in a moment. If the problem continues, contact admin."
           );
         } else {
-          setError("Something went wrong while submitting. Please try again.");
+          setError(
+            "Something went wrong while submitting your order. Please contact admin if it keeps happening."
+          );
         }
       } finally {
         setIsSubmitting(false);
       }
     },
-    [clearDraft, createPublicOrderCallable, isLivestock, items, runWithRetry, variant]
+    [
+      createPublicOrderCallable,
+      isLivestock,
+      items,
+      runWithRetry,
+      variant,
+    ]
   );
 
   useEffect(() => {
@@ -1100,14 +961,13 @@ export default function OrderForm({ variant = "eggs" }) {
     logEvent("order_submit_attempt", {
       variant,
       lineItemCount: payload.lineItems.length,
-      hasServerDraftToken: Boolean(draftId && resumeToken),
       network: isOnline ? "online" : "offline",
     });
 
     if (!isOnline) {
       setQueuedPayload(payload);
       setSuccess(
-        "You are offline. We will submit your order automatically when your connection returns."
+        "You are offline. Keep this page open and we will submit your order automatically when your connection returns."
       );
       return;
     }
@@ -1162,16 +1022,7 @@ export default function OrderForm({ variant = "eggs" }) {
         onSubmit={submitOrder}
         className={`${cardClass} space-y-6 p-6 md:p-8`}
       >
-        {!isOnline ? (
-          <Banner message={statusLabel} tone="warning" />
-        ) : (
-          <Banner message="Connected. Your progress is auto-saved on this device." />
-        )}
-        {lastSavedAt ? (
-          <p className="text-xs text-brandGreen/70">
-            Last saved: {new Date(lastSavedAt).toLocaleTimeString()}
-          </p>
-        ) : null}
+        {!isOnline ? <Banner message={statusLabel} tone="warning" /> : null}
 
         {error ? <ErrorMessage message={error} /> : null}
         {success ? <Banner message={success} tone="success" /> : null}
@@ -1205,25 +1056,21 @@ export default function OrderForm({ variant = "eggs" }) {
                 </span>
               </p>
               <input
-                type="text"
+                type="date"
                 className={`${inputClass} md:w-56 ${
                   fieldErrors.sendDate
                     ? "border-red-400 focus:border-red-500 focus:ring-red-200"
                     : ""
                 }`}
-                inputMode="numeric"
-                placeholder="DD/MM/YYYY or YYYY/MM/DD"
-                value={form.sendDate}
-                onChange={(event) => setField("sendDate", event.target.value)}
-                onBlur={(event) => {
-                  const parsed = parseOrderDateInput(event.target.value);
-                  if (parsed) setField("sendDate", parsed.dayMonthYear);
-                }}
+                value={parseOrderDateInput(form.sendDate)?.iso ?? ""}
+                onChange={handleSendDateChange}
+                onClick={openSendDatePicker}
+                onKeyDown={handleSendDateKeyDown}
                 ref={(element) => {
+                  sendDatePickerRef.current = element;
                   fieldRefs.current.sendDate = element;
                 }}
                 aria-invalid={Boolean(fieldErrors.sendDate)}
-                required
               />
               {dateHelper ? (
                 <p className="text-xs text-brandGreen/70">{dateHelper}</p>
@@ -1371,34 +1218,14 @@ export default function OrderForm({ variant = "eggs" }) {
               aria-invalid={Boolean(fieldErrors.email)}
             />
             <p className="text-xs text-brandGreen/70">
-              Provide either email or WhatsApp.
+              Email is optional if we can reach you on WhatsApp.
             </p>
-          </div>
-          <div className="space-y-2">
-            <label className="block text-sm font-semibold text-brandGreen">
-              WhatsApp number
-            </label>
-            <input
-              type="tel"
-              className={`${inputClass} ${
-                fieldErrors.whatsapp
-                  ? "border-red-400 focus:border-red-500 focus:ring-red-200"
-                  : ""
-              }`}
-              value={form.whatsapp}
-              onChange={(event) => setField("whatsapp", event.target.value)}
-              placeholder="e.g. +27 82 123 4567"
-              ref={(element) => {
-                fieldRefs.current.whatsapp = element;
-              }}
-              aria-invalid={Boolean(fieldErrors.whatsapp)}
-            />
           </div>
           <div className="space-y-2">
             <label className="block text-sm font-semibold text-brandGreen">
               Cellphone number*
             </label>
-            <div className="grid grid-cols-[200px_1fr] gap-2">
+            <div className="grid grid-cols-1 gap-2">
               <select
                 className={`${inputClass} ${
                   fieldErrors.countryCode
@@ -1438,6 +1265,62 @@ export default function OrderForm({ variant = "eggs" }) {
               />
             </div>
           </div>
+          <div className="space-y-3 md:col-span-2">
+            <div className="rounded-xl border border-brandGreen/15 bg-white/60 p-4">
+              <p className="text-sm font-semibold text-brandGreen">
+                Is this also your WhatsApp number?
+              </p>
+              <div className="mt-3 flex flex-wrap gap-3">
+                <label className="inline-flex items-center gap-2 rounded-lg border border-brandGreen/20 bg-white px-3 py-2 text-sm text-brandGreen">
+                  <input
+                    type="radio"
+                    name="whatsappMatchesCellphone"
+                    className="h-4 w-4 accent-brandGreen"
+                    checked={form.whatsappMatchesCellphone}
+                    onChange={() => setField("whatsappMatchesCellphone", true)}
+                  />
+                  <span>Yes</span>
+                </label>
+                <label className="inline-flex items-center gap-2 rounded-lg border border-brandGreen/20 bg-white px-3 py-2 text-sm text-brandGreen">
+                  <input
+                    type="radio"
+                    name="whatsappMatchesCellphone"
+                    className="h-4 w-4 accent-brandGreen"
+                    checked={!form.whatsappMatchesCellphone}
+                    onChange={() => setField("whatsappMatchesCellphone", false)}
+                  />
+                  <span>No</span>
+                </label>
+              </div>
+              <p className="mt-3 text-xs text-brandGreen/70">
+                {form.whatsappMatchesCellphone
+                  ? "We'll use your cellphone number for WhatsApp updates."
+                  : "Add a different WhatsApp number below, or leave it blank if you'd rather use email for updates."}
+              </p>
+            </div>
+          </div>
+          {!form.whatsappMatchesCellphone ? (
+            <div className="space-y-2 md:col-span-2">
+              <label className="block text-sm font-semibold text-brandGreen">
+                WhatsApp number
+              </label>
+              <input
+                type="tel"
+                className={`${inputClass} ${
+                  fieldErrors.whatsapp
+                    ? "border-red-400 focus:border-red-500 focus:ring-red-200"
+                    : ""
+                }`}
+                value={form.whatsapp}
+                onChange={(event) => setField("whatsapp", event.target.value)}
+                placeholder="e.g. +27 82 123 4567"
+                ref={(element) => {
+                  fieldRefs.current.whatsapp = element;
+                }}
+                aria-invalid={Boolean(fieldErrors.whatsapp)}
+              />
+            </div>
+          ) : null}
           <div className="space-y-3 md:col-span-2">
             <label className="block text-sm font-semibold text-brandGreen">
               Delivery address details*
@@ -1747,22 +1630,6 @@ export default function OrderForm({ variant = "eggs" }) {
             You can update your order later by reaching out on WhatsApp.
           </span>
           <div className="flex flex-wrap gap-2">
-            <Button
-              type="button"
-              variant="ghost"
-              disabled={isSavingDraft || !hasDraftContent}
-              onClick={() => void saveDraftToServer()}
-            >
-              {isSavingDraft ? "Saving..." : "Save draft"}
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              disabled={isResumingDraft || !draftId || !resumeToken}
-              onClick={() => void resumeDraftFromServer()}
-            >
-              {isResumingDraft ? "Restoring..." : "Restore draft"}
-            </Button>
             <Button type="submit" disabled={isSubmitting || isRetrying}>
               {isSubmitting || isRetrying ? "Submitting..." : "Submit order"}
             </Button>
@@ -1772,18 +1639,18 @@ export default function OrderForm({ variant = "eggs" }) {
 
       <Dialog
         open={isModalOpen}
-        title="Order received"
+        title={modalTitle}
         onClose={() => setIsModalOpen(false)}
         closeLabel="Got it"
       >
-        <p className="mt-2 text-sm text-brandGreen/80">
-          Thank you! Your order has been submitted. We will use your provided
-          contact details to send updates as we process your order.
-        </p>
+        <p className="mt-2 text-sm text-brandGreen/80">{modalMessage}</p>
         {orderNumber ? (
           <p className="mt-2 text-sm font-semibold text-brandGreen">
             Your order number: {orderNumber}
           </p>
+        ) : null}
+        {modalNote ? (
+          <p className="mt-2 text-sm text-brandGreen/75">{modalNote}</p>
         ) : null}
       </Dialog>
 

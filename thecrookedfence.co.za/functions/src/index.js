@@ -63,6 +63,7 @@ const SUPPORTED_IMAGE_TYPES = new Set([
 ]);
 const ORDER_DRAFTS_COLLECTION = "orderDrafts";
 const ORDER_IDEMPOTENCY_COLLECTION = "orderIdempotency";
+const PUBLIC_ORDER_ERRORS_COLLECTION = "publicOrderErrors";
 const PUBLIC_ORDER_SCHEMA_VERSION = 1;
 const PUBLIC_DRAFT_TTL_DAYS = 14;
 const PUBLIC_ORDER_FORM_TYPES = new Set(["eggs", "livestock"]);
@@ -727,12 +728,7 @@ const normalizeIdempotencyKey = (value) => {
 
 const normalizeOrderDateIso = (value) => {
   const raw = normalizeString(value, 20);
-  if (!raw) {
-    throw new functions.https.HttpsError(
-      "invalid-argument",
-      "Send date is required."
-    );
-  }
+  if (!raw) return "";
   const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!match) {
     throw new functions.https.HttpsError(
@@ -833,6 +829,51 @@ const normalizeClientMeta = (value = {}) => ({
   locale: normalizeString(value.locale, 30),
   onlineStatus: normalizeString(value.onlineStatus, 20),
 });
+
+const serializePublicOrderError = (error) => {
+  let details = "";
+  if (error?.details !== undefined) {
+    try {
+      details = normalizeString(JSON.stringify(error.details), 4000);
+    } catch (_serializationError) {
+      details = normalizeString(String(error.details), 4000);
+    }
+  }
+
+  return {
+    code: normalizeString(error?.code, 120),
+    message: normalizeString(error?.message, 2000) || "Unknown error.",
+    details,
+    stack: normalizeString(error?.stack, 8000),
+  };
+};
+
+const logPublicOrderError = async ({
+  context,
+  target = "",
+  formType = "",
+  collectionName = "",
+  orderId = "",
+  orderNumber = "",
+  idempotencyKey = "",
+  error,
+}) => {
+  try {
+    await db.collection(PUBLIC_ORDER_ERRORS_COLLECTION).add({
+      context: normalizeString(context, 120),
+      target: normalizeString(target, 120),
+      formType: normalizeString(formType, 20),
+      collectionName: normalizeString(collectionName, 40),
+      orderId: normalizeString(orderId, 120),
+      orderNumber: normalizeString(orderNumber, 40),
+      idempotencyKey: normalizeString(idempotencyKey, 128),
+      error: serializePublicOrderError(error),
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+  } catch (logFailure) {
+    console.error("public order error log failed", logFailure);
+  }
+};
 
 const buildPublicOrderPayload = (input) => {
   const formType = normalizePublicFormType(input?.formType);
@@ -1050,7 +1091,13 @@ const ensureOrderNumber = async (collectionName, orderRef, orderData) => {
   return assignOrderNumber(collectionName, orderRef);
 };
 
-const sendOrderCreatedEmails = async ({ order, collectionName }) => {
+const sendOrderCreatedEmails = async ({
+  order,
+  collectionName,
+  orderRef = null,
+  formType = "",
+  idempotencyKey = "",
+}) => {
   const items = getOrderItems(order);
   const totals = calculateOrderTotals(order);
   const name = getCustomerName(order);
@@ -1134,21 +1181,94 @@ const sendOrderCreatedEmails = async ({ order, collectionName }) => {
     body: adminBody,
   });
 
+  const customerEmailResult = {
+    status: order.email ? "failed" : "not_requested",
+    errorMessage: "",
+  };
+  const adminEmailResult = {
+    status: adminRecipients.length > 0 ? "failed" : "not_requested",
+    errorMessage: "",
+  };
+
   if (order.email) {
-    await sendEmail({
-      to: [order.email],
-      subject: `Your order${orderNumberLabel} with ${BRAND_NAME}`,
-      html: customerHtml,
-    });
+    try {
+      await sendEmail({
+        to: [order.email],
+        subject: `Your order${orderNumberLabel} with ${BRAND_NAME}`,
+        html: customerHtml,
+      });
+      customerEmailResult.status = "sent";
+    } catch (error) {
+      customerEmailResult.errorMessage =
+        normalizeString(error?.message, 500) || "Unable to send confirmation email.";
+      await logPublicOrderError({
+        context: "order_created_email",
+        target: "customer_confirmation",
+        formType,
+        collectionName,
+        orderId: order.id,
+        orderNumber,
+        idempotencyKey,
+        error,
+      });
+    }
   }
 
   if (adminRecipients.length > 0) {
-    await sendEmail({
-      to: adminRecipients,
-      subject: `New ${orderTypeLabel} order${orderNumberLabel}`,
-      html: adminHtml,
-    });
+    try {
+      await sendEmail({
+        to: adminRecipients,
+        subject: `New ${orderTypeLabel} order${orderNumberLabel}`,
+        html: adminHtml,
+      });
+      adminEmailResult.status = "sent";
+    } catch (error) {
+      adminEmailResult.errorMessage =
+        normalizeString(error?.message, 500) || "Unable to send admin notification email.";
+      await logPublicOrderError({
+        context: "order_created_email",
+        target: "admin_notification",
+        formType,
+        collectionName,
+        orderId: order.id,
+        orderNumber,
+        idempotencyKey,
+        error,
+      });
+    }
   }
+
+  if (orderRef) {
+    try {
+      await orderRef.set(
+        {
+          customerConfirmationEmailStatus: customerEmailResult.status,
+          customerConfirmationEmailError: customerEmailResult.errorMessage,
+          adminNotificationEmailStatus: adminEmailResult.status,
+          adminNotificationEmailError: adminEmailResult.errorMessage,
+          orderCreatedEmailAttemptedAt:
+            admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+    } catch (error) {
+      await logPublicOrderError({
+        context: "order_created_email_status",
+        target: "order_status_update",
+        formType,
+        collectionName,
+        orderId: order.id,
+        orderNumber,
+        idempotencyKey,
+        error,
+      });
+    }
+  }
+
+  return {
+    customerEmailStatus: customerEmailResult.status,
+    adminEmailStatus: adminEmailResult.status,
+  };
 };
 
 const sendOrderStatusEmails = async ({
@@ -1544,85 +1664,138 @@ exports.resumePublicOrderDraft = functions.https.onCall(async (data) => {
 });
 
 exports.createPublicOrder = functions.https.onCall(async (data) => {
-  const prepared = buildPublicOrderPayload(data || {});
-  const idempotencyRef = db
-    .collection(ORDER_IDEMPOTENCY_COLLECTION)
-    .doc(prepared.idempotencyKey);
-  const newOrderRef = db.collection(prepared.collectionName).doc();
+  let prepared = null;
+  let resolvedOrderId = "";
+  let finalCollectionName = "";
+  let orderNumber = "";
 
-  const transactionResult = await db.runTransaction(async (tx) => {
-    const existing = await tx.get(idempotencyRef);
-    if (existing.exists) {
-      const existingData = existing.data() || {};
+  try {
+    prepared = buildPublicOrderPayload(data || {});
+    const idempotencyRef = db
+      .collection(ORDER_IDEMPOTENCY_COLLECTION)
+      .doc(prepared.idempotencyKey);
+    const newOrderRef = db.collection(prepared.collectionName).doc();
+
+    const transactionResult = await db.runTransaction(async (tx) => {
+      const existing = await tx.get(idempotencyRef);
+      if (existing.exists) {
+        const existingData = existing.data() || {};
+        return {
+          status: "duplicate",
+          orderId: normalizeString(existingData.orderId, 120),
+          collectionName:
+            normalizeString(existingData.collectionName, 40) ||
+            prepared.collectionName,
+        };
+      }
+
+      tx.set(newOrderRef, prepared.payload);
+      tx.set(
+        idempotencyRef,
+        {
+          orderId: newOrderRef.id,
+          collectionName: prepared.collectionName,
+          draftId: prepared.draftId,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+
       return {
-        status: "duplicate",
-        orderId: normalizeString(existingData.orderId, 120),
-        collectionName:
-          normalizeString(existingData.collectionName, 40) ||
-          prepared.collectionName,
-      };
-    }
-
-    tx.set(newOrderRef, prepared.payload);
-    tx.set(
-      idempotencyRef,
-      {
+        status: "created",
         orderId: newOrderRef.id,
         collectionName: prepared.collectionName,
-        draftId: prepared.draftId,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      { merge: true }
+      };
+    });
+
+    resolvedOrderId =
+      transactionResult.orderId || normalizeString(data?.fallbackOrderId, 120);
+    if (!resolvedOrderId) {
+      throw new functions.https.HttpsError(
+        "internal",
+        "Unable to resolve order id."
+      );
+    }
+
+    finalCollectionName =
+      transactionResult.collectionName || prepared.collectionName;
+    const finalOrderRef = db.collection(finalCollectionName).doc(resolvedOrderId);
+    const finalOrderSnap = await finalOrderRef.get();
+    if (!finalOrderSnap.exists) {
+      throw new functions.https.HttpsError("internal", "Order write failed.");
+    }
+    const finalOrder = finalOrderSnap.data() || {};
+    orderNumber = await ensureOrderNumber(
+      finalCollectionName,
+      finalOrderRef,
+      finalOrder
     );
+
+    if (prepared.draftId) {
+      await db.collection(ORDER_DRAFTS_COLLECTION).doc(prepared.draftId).set(
+        {
+          submittedOrderId: resolvedOrderId,
+          submittedOrderNumber: orderNumber,
+          submittedCollection: finalCollectionName,
+          submittedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+    }
+
+    let customerEmailStatus = "not_attempted";
+    if (transactionResult.status !== "duplicate") {
+      try {
+        const emailResult = await sendOrderCreatedEmails({
+          order: { ...finalOrder, orderNumber, id: resolvedOrderId },
+          collectionName: finalCollectionName,
+          orderRef: finalOrderRef,
+          formType: prepared.formType,
+          idempotencyKey: prepared.idempotencyKey,
+        });
+        customerEmailStatus = emailResult.customerEmailStatus;
+      } catch (error) {
+        customerEmailStatus = finalOrder.email ? "failed" : "not_requested";
+        await logPublicOrderError({
+          context: "create_public_order_email",
+          target: "email_pipeline",
+          formType: prepared.formType,
+          collectionName: finalCollectionName,
+          orderId: resolvedOrderId,
+          orderNumber,
+          idempotencyKey: prepared.idempotencyKey,
+          error,
+        });
+      }
+    }
 
     return {
-      status: "created",
-      orderId: newOrderRef.id,
-      collectionName: prepared.collectionName,
+      status: transactionResult.status || "created",
+      orderId: resolvedOrderId,
+      orderNumber,
+      customerEmailStatus,
     };
-  });
-
-  const resolvedOrderId =
-    transactionResult.orderId || normalizeString(data?.fallbackOrderId, 120);
-  if (!resolvedOrderId) {
+  } catch (error) {
+    const isHttpsError = error instanceof functions.https.HttpsError;
+    if (!isHttpsError || error.code !== "invalid-argument") {
+      await logPublicOrderError({
+        context: "create_public_order",
+        target: "submission",
+        formType: prepared?.formType || "",
+        collectionName: finalCollectionName || prepared?.collectionName || "",
+        orderId: resolvedOrderId,
+        orderNumber,
+        idempotencyKey: prepared?.idempotencyKey || "",
+        error,
+      });
+    }
+    if (isHttpsError) throw error;
     throw new functions.https.HttpsError(
       "internal",
-      "Unable to resolve order id."
+      "Unable to place the order right now."
     );
   }
-
-  const finalCollectionName =
-    transactionResult.collectionName || prepared.collectionName;
-  const finalOrderRef = db.collection(finalCollectionName).doc(resolvedOrderId);
-  const finalOrderSnap = await finalOrderRef.get();
-  if (!finalOrderSnap.exists) {
-    throw new functions.https.HttpsError("internal", "Order write failed.");
-  }
-  const finalOrder = finalOrderSnap.data() || {};
-  const orderNumber = await ensureOrderNumber(
-    finalCollectionName,
-    finalOrderRef,
-    finalOrder
-  );
-
-  if (prepared.draftId) {
-    await db.collection(ORDER_DRAFTS_COLLECTION).doc(prepared.draftId).set(
-      {
-        submittedOrderId: resolvedOrderId,
-        submittedOrderNumber: orderNumber,
-        submittedCollection: finalCollectionName,
-        submittedAt: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      { merge: true }
-    );
-  }
-
-  return {
-    status: transactionResult.status || "created",
-    orderId: resolvedOrderId,
-    orderNumber,
-  };
 });
 
 exports.createUserProfile = functions.auth.user().onCreate(async (user) => {
@@ -2238,11 +2411,16 @@ exports.emailOnOrderCreate = functions.firestore
   .onCreate(async (snap) => {
     const orderRef = snap.ref;
     const order = snap.data() || {};
+    if (order.submissionSource === "callable:createPublicOrder") return null;
     const orderNumber = await ensureOrderNumber("eggOrders", orderRef, order);
     await sendOrderCreatedEmails({
       order: { ...order, orderNumber, id: snap.id },
       collectionName: "eggOrders",
+      orderRef,
+      formType: order.formType || "eggs",
+      idempotencyKey: order.idempotencyKey || "",
     });
+    return null;
   });
 
 exports.emailOnLivestockOrderCreate = functions.firestore
@@ -2250,6 +2428,7 @@ exports.emailOnLivestockOrderCreate = functions.firestore
   .onCreate(async (snap) => {
     const orderRef = snap.ref;
     const order = snap.data() || {};
+    if (order.submissionSource === "callable:createPublicOrder") return null;
     const orderNumber = await ensureOrderNumber(
       "livestockOrders",
       orderRef,
@@ -2258,7 +2437,11 @@ exports.emailOnLivestockOrderCreate = functions.firestore
     await sendOrderCreatedEmails({
       order: { ...order, orderNumber, id: snap.id },
       collectionName: "livestockOrders",
+      orderRef,
+      formType: order.formType || "livestock",
+      idempotencyKey: order.idempotencyKey || "",
     });
+    return null;
   });
 
 exports.emailOnStatusChange = functions.firestore

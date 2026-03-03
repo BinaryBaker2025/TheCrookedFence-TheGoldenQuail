@@ -122,6 +122,15 @@ const formatDateTimeDisplay = (value) => {
   return date ? date.toLocaleString() : "-";
 };
 
+const isTimedEventCompleted = (entry, nowMs = Date.now()) => {
+  if (!entry || Boolean(entry.allDay)) return false;
+  const endAt = toDate(entry.endAt);
+  const startAt = toDate(entry.startAt);
+  const marker = endAt || startAt;
+  if (!marker) return false;
+  return marker.getTime() < nowMs;
+};
+
 function OperationsDialog({
   isOpen,
   title,
@@ -1055,6 +1064,18 @@ export default function OperationsPage() {
             updatedAt: serverTimestamp(),
             updatedByUid: user.uid,
           });
+          const nextStatus = draft.status || "todo";
+          await updateDoc(doc(db, occurrenceCollection, draft.occurrenceId), {
+            status: nextStatus,
+            progressNote: String(draft.progressNote || "").trim(),
+            completedAt:
+              nextStatus === "done"
+                ? occurrence.completedAt || serverTimestamp()
+                : null,
+            completedByUid: nextStatus === "done" ? user.uid : "",
+            updatedAt: serverTimestamp(),
+            updatedByUid: user.uid,
+          });
         }
       } else {
         if (isRecurringOccurrence) {
@@ -1559,6 +1580,7 @@ export default function OperationsPage() {
       .map((entry) => {
         const start = toDate(entry.startAt);
         if (!start) return null;
+        const eventCompleted = isTimedEventCompleted(entry);
         const categoryColor =
           eventCategories.find((cat) => cat.id === entry.categoryId)?.color || "#1d4ed8";
         return {
@@ -1570,14 +1592,15 @@ export default function OperationsPage() {
           editable: isAdmin && !entry.isRecurring,
           startEditable: isAdmin && !entry.isRecurring,
           durationEditable: isAdmin && !entry.isRecurring,
-          backgroundColor: tintHex(categoryColor),
-          borderColor: categoryColor,
-          textColor: "#0f3d2e",
+          backgroundColor: eventCompleted ? "#e5e7eb" : tintHex(categoryColor),
+          borderColor: eventCompleted ? "#9ca3af" : categoryColor,
+          textColor: eventCompleted ? "#4b5563" : "#0f3d2e",
           extendedProps: {
             kind: "event",
             occurrenceId: entry.id,
             eventId: entry.eventId,
             isRecurring: Boolean(entry.isRecurring),
+            eventCompleted,
           },
         };
       })
@@ -1621,13 +1644,18 @@ export default function OperationsPage() {
     const kind = eventInfo.event.extendedProps?.kind;
     const isTaskItem = kind === "task";
     const isTaskDone = isTaskItem && eventInfo.event.extendedProps?.taskStatus === "done";
+    const isEventCompleted =
+      !isTaskItem && eventInfo.event.extendedProps?.eventCompleted === true;
+    const isCompleted = isTaskDone || isEventCompleted;
     return (
       <div className="flex items-center gap-1 overflow-hidden">
         <span
           className={`inline-flex h-4 w-4 flex-none items-center justify-center rounded-full ${
             isTaskItem
               ? "bg-brandGreen/15 text-brandGreen"
-              : "bg-blue-100 text-blue-700"
+              : isEventCompleted
+                ? "bg-slate-200 text-slate-700"
+                : "bg-blue-100 text-blue-700"
           }`}
         >
           {isTaskItem ? (
@@ -1636,7 +1664,7 @@ export default function OperationsPage() {
             <IconCalendar className="h-2.5 w-2.5" />
           )}
         </span>
-        <span className={`truncate text-[11px] font-semibold ${isTaskDone ? "line-through opacity-70" : ""}`}>
+        <span className={`truncate text-[11px] font-semibold ${isCompleted ? "line-through opacity-70" : ""}`}>
           {eventInfo.event.title}
         </span>
       </div>

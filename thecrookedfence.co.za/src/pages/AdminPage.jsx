@@ -12619,6 +12619,23 @@ function OrderDetailModal({
   };
 
   const saveSendDate = async ({ showSuccessMessage = false } = {}) => {
+    if (!draft.sendDate.trim()) {
+      const currentValue = String(order.sendDate ?? "").trim();
+      if (!currentValue) {
+        if (showSuccessMessage) setSendDateMessage("Send date cleared.");
+        return "";
+      }
+      try {
+        await onUpdate({ sendDate: "" });
+        if (showSuccessMessage) setSendDateMessage("Send date cleared.");
+        return "";
+      } catch (err) {
+        console.error("send date update error", err);
+        setSendDateMessage("Unable to save send date.");
+        return null;
+      }
+    }
+
     const parsed = parseOrderDateInput(draft.sendDate);
     if (!parsed) {
       setSendDateMessage("Use DD/MM/YYYY or YYYY/MM/DD.");
@@ -12833,7 +12850,7 @@ function OrderDetailModal({
 
   const handleDispatchEmail = async () => {
     const normalizedSendDate = await saveSendDate({ showSuccessMessage: true });
-    if (!normalizedSendDate) return;
+    if (normalizedSendDate === null) return;
     setDispatchSending(true);
     setDispatchMessage("");
     try {
@@ -12846,8 +12863,7 @@ function OrderDetailModal({
     }
   };
 
-  const canSendDispatch =
-    Boolean(order.email) && Boolean(parseOrderDateInput(draft.sendDate));
+  const canSendDispatch = Boolean(order.email);
   const allowEggSubstitutions =
     !isLivestock &&
     (order.allowEggSubstitutions ?? order.allowSubstitutions) !== false;
